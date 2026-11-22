@@ -11,7 +11,8 @@ Verify every scientific reference and quantitative claim against live primary-so
    - Whole document or slide deck (`.md`, `.txt`, `.docx`, `.pptx`): `ref-verify scan <file>`
    - Bibliography or claim list: write a JSON array (`doi`, `pmid`, `title`, `author`, `year`, `journal`, `claim`) and run `ref-verify batch <refs.json>`
    - Single citation or specific claim: `ref-verify check --doi ... --pmid ... --title ... --author ... --year ... --journal ... --claim "..."`
-   - Pass `--fulltext` when a quantitative claim cites subgroup or secondary figures absent from the abstract (fetches Open Access JATS XML from Europe PMC with NCBI PMC fallback when a PMCID is available).
+   - Pass `--fulltext` when a quantitative claim cites subgroup or secondary figures absent from the abstract (fetches Open Access JATS XML from NCBI PMC with Europe PMC fallback when a PMCID is available).
+   - For `batch` and `scan`, `ref-verify` automatically batches API lookups and runs verification concurrently (tune with `--workers <n>`, default `8`).
 
 2. **Triage every diagnostic code by severity.**
    - **`CRITICAL` (`RETRACTED_PAPER`, `PMID_DOI_CONFLICT`)**: Stop and resolve immediately. Remove retracted sources from supporting evidence (or label them explicitly as retracted if discussing the retraction). For conflicts, confirm which paper is intended and replace the mismatched identifier.

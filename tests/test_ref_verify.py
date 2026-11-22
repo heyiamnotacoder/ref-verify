@@ -842,6 +842,166 @@ class TestBatchCLI(unittest.TestCase):
             self.assertEqual(parsed["summary"]["pass"], 1)
             self.assertEqual(parsed["summary"]["fail"], 1)
 
+    def test_batch_prefetch_uses_multi_id_endpoints_and_preserves_order(self) -> None:
+        cr_batch_payload = {
+            "message": {
+                "items": [
+                    DAPA_HF_CROSSREF["message"],
+                    {
+                        "DOI": "10.1056/NEJMoa1504720",
+                        "title": ["Empagliflozin, Cardiovascular Outcomes, and Mortality in Type 2 Diabetes"],
+                        "author": [{"family": "Zinman", "given": "Bernard"}],
+                        "published-print": {"date-parts": [[2015, 11, 26]]},
+                        "container-title": ["New England Journal of Medicine"],
+                        "short-container-title": ["N Engl J Med"],
+                    },
+                ]
+            }
+        }
+        pm_batch_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?><PubmedArticleSet>'
+            + DAPA_HF_PUBMED_XML.replace(
+                '<ArticleId IdType="doi">10.1056/NEJMoa1911303</ArticleId>',
+                '<ArticleId IdType="doi">10.1056/NEJMoa1911303</ArticleId><ArticleId IdType="pmc">PMC7654321</ArticleId>',
+            )
+            .split("<PubmedArticleSet>", 1)[1]
+            .split("</PubmedArticleSet>", 1)[0]
+            + OTHER_PAPER_PUBMED_XML.replace(
+                '<ArticleId IdType="doi">10.1056/NEJMoa1504720</ArticleId>',
+                '<ArticleId IdType="doi">10.1056/NEJMoa1504720</ArticleId><ArticleId IdType="pmc">PMC9999999</ArticleId>',
+            )
+            .split("<PubmedArticleSet>", 1)[1]
+            .split("</PubmedArticleSet>", 1)[0]
+            + "</PubmedArticleSet>"
+        )
+        pmc_batch_xml = (
+            "<pmc-articleset>"
+            '<article><front><article-meta><article-id pub-id-type="pmc">7654321</article-id></article-meta></front>'
+            "<body><p>In the diabetes subgroup of 1983 patients, the hazard ratio was 0.75 (95% CI, 0.63 to 0.90).</p></body>"
+            "</article>"
+            '<article><front><article-meta><article-id pub-id-type="pmc">PMC9999999</article-id></article-meta></front>'
+            "<body><p>Empagliflozin reduced cardiovascular mortality in patients with type 2 diabetes.</p></body>"
+            "</article>"
+            "</pmc-articleset>"
+        )
+        http = FakeHttpClient(
+            [
+                ("api.crossref.org/works?filter=", rv.HttpResponse(200, json.dumps(cr_batch_payload), "cr-batch")),
+                (
+                    "esearch.fcgi",
+                    rv.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829", "26378978"]}}), "es"),
+                ),
+                ("efetch.fcgi?db=pubmed&id=31535829,26378978", rv.HttpResponse(200, pm_batch_xml, "pm-batch")),
+                ("efetch.fcgi?db=pmc&id=PMC7654321", rv.HttpResponse(200, pmc_batch_xml, "pmc-batch")),
+            ]
+        )
+        cits = [
+            rv.CitationInput(
+                doi="10.1056/NEJMoa1911303",
+                author="McMurray",
+                year="2019",
+                claim="Subgroup N=1983 had HR 0.75 (95% CI 0.63-0.90).",
+                label="first",
+                fulltext=True,
+            ),
+            rv.CitationInput(
+                doi="10.1056/NEJMoa1504720",
+                author="Zinman",
+                year="2015",
+                label="second",
+                fulltext=False,
+            ),
+        ]
+        results = rv.verify_citations_batch(cits, http, max_workers=4)
+        self.assertEqual([r.input.label for r in results], ["first", "second"])
+        self.assertEqual(results[0].status, "PASS")
+        self.assertEqual(results[1].status, "PASS")
+        assert results[0].claim_report is not None
+        self.assertEqual(results[0].claim_report.missing_numbers, [])
+        self.assertIn("N=1983 [fulltext]", results[0].claim_report.matched_numbers)
+        # Europe PMC is skipped entirely when Crossref + PubMed already resolve everything!
+        self.assertFalse(any("europepmc" in u for u in http.calls))
+        # Total HTTP calls: Crossref batch + PubMed esearch batch + PubMed efetch batch + NCBI PMC fulltext (4 total)
+        self.assertEqual(len(http.calls), 4)
+
+        # Non-OA article with bodyless NCBI PMC XML skips Europe PMC fullTextXML cleanly
+        non_oa_http = FakeHttpClient(
+            [
+                (
+                    "efetch.fcgi?db=pmc&id=PMC9999999",
+                    rv.HttpResponse(
+                        200,
+                        "<pmc-articleset><article><front><article-meta/></front></article></pmc-articleset>",
+                        "pmc",
+                    ),
+                ),
+            ]
+        )
+        ft = rv.fetch_oa_fulltext_paragraphs(non_oa_http, "PMC9999999", is_open_access=False)
+        self.assertEqual(ft.paragraphs, [])
+        self.assertFalse(any("fullTextXML" in u for u in non_oa_http.calls))
+
+    def test_batch_falls_back_gracefully_when_batch_endpoint_fails(self) -> None:
+        http = FakeHttpClient(
+            [
+                ("api.crossref.org/works?filter=", rv.HttpResponse(500, "", "cr-batch", "HTTP 500")),
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1911303",
+                    rv.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr-1"),
+                ),
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1504720",
+                    rv.HttpResponse(404, "", "cr-2", "HTTP 404 Not Found"),
+                ),
+                (
+                    "europepmc/webservices/rest/search",
+                    rv.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                ),
+                ("esearch.fcgi", rv.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+            ]
+        )
+        cits = [
+            rv.CitationInput(doi="10.1056/NEJMoa1911303", year="2019", label="ok"),
+            rv.CitationInput(doi="10.1056/NEJMoa1504720", year="2015", label="missing"),
+        ]
+        results = rv.verify_citations_batch(cits, http, max_workers=2)
+        self.assertEqual(results[0].status, "PASS")
+        self.assertEqual(results[1].status, "FAIL")
+        self.assertIn("DOI_NOT_FOUND", [d.code for d in results[1].diagnostics])
+
+    def test_multi_xml_parsers_and_decompression(self) -> None:
+        import gzip
+        import zlib
+
+        sample = b"hello ref-verify"
+        self.assertEqual(rv._decompress_body(gzip.compress(sample), "gzip"), sample)
+        self.assertEqual(rv._decompress_body(zlib.compress(sample), "deflate"), sample)
+        self.assertEqual(rv._decompress_body(sample, ""), sample)
+
+        many_pm = rv.parse_pubmed_xml_many(
+            "<PubmedArticleSet>"
+            + DAPA_HF_PUBMED_XML.split("<PubmedArticleSet>", 1)[1].split("</PubmedArticleSet>", 1)[0]
+            + OTHER_PAPER_PUBMED_XML.split("<PubmedArticleSet>", 1)[1].split("</PubmedArticleSet>", 1)[0]
+            + "</PubmedArticleSet>"
+        )
+        self.assertEqual(set(many_pm.keys()), {"31535829", "26378978"})
+
+        many_pmc = rv.parse_pmc_xml_many(
+            "<pmc-articleset>"
+            '<article><front><article-meta><article-id pub-id-type="pmc">12345</article-id></article-meta></front>'
+            "<body><p>Sufficiently long full-text body paragraph for parsing verification.</p></body></article>"
+            "</pmc-articleset>"
+        )
+        self.assertIn("PMC12345", many_pmc)
+        self.assertEqual(len(many_pmc["PMC12345"].paragraphs), 1)
+
+    def test_workers_flag_parsed_on_batch_and_scan(self) -> None:
+        parser = rv.build_parser()
+        args_b = parser.parse_args(["batch", "refs.json", "--workers", "4"])
+        self.assertEqual(args_b.workers, 4)
+        args_s = parser.parse_args(["scan", "paper.md", "--workers", "1"])
+        self.assertEqual(args_s.workers, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
