@@ -5,7 +5,7 @@
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-**Zero-dependency Python CLI and AI agent skill for verifying scientific citations and grounding quantitative claims against live Crossref, PubMed, and Europe PMC records.**
+**Python CLI and AI agent skill for verifying scientific citations and grounding quantitative claims against live Crossref, PubMed, and Europe PMC records.**
 
 LLMs routinely hallucinate DOIs, swap PMIDs, miss retractions, misattribute first authors, or subtly alter hazard ratios and sample sizes. Plain pass/fail linters leave an agent guessing what went wrong. `ref-verify` emits structured, **pinpointing diagnostics** (`Expected`, `Actual`, `Hint`, `Fix`, `TokenDiff`, and `DID_YOU_MEAN` recovery suggestions) alongside the paper's official abstract so an AI agent—or a human author—can fix broken citations in a single pass.
 
