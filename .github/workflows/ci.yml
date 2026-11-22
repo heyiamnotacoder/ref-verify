@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ruff and package
+        run: |
+          python -m pip install --upgrade pip ruff
+          python -m pip install .
+
+      - name: Run lint, format, and unit tests
+        run: ./scripts/check.sh
+
+      - name: CLI smoke check
+        run: |
+          ref-verify --version
+          ref-verify --help

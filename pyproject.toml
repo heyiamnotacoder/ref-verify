@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ref-verify"
+version = "0.1.0"
+description = "Zero-dependency CLI and AI agent skill for verifying scientific citations (DOI/PMID, retractions, metadata diffs, and claim grounding) with pinpointing diagnostics"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Dhruvik Pandya" }]
+keywords = ["citations", "doi", "pubmed", "crossref", "europe-pmc", "scientific-verification", "agent-skill"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = []
+
+[project.scripts]
+ref-verify = "ref_verify.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/heyiamnotacoder/ref-verify"
+Repository = "https://github.com/heyiamnotacoder/ref-verify"
+Issues = "https://github.com/heyiamnotacoder/ref-verify/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ref_verify"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
