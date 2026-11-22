@@ -622,12 +622,17 @@ def _decompress_body(raw: bytes, content_encoding: str) -> bytes:
     return raw
 
 
+def _is_transient_http(resp: Optional[HttpResponse]) -> bool:
+    return resp is not None and (resp.status == 0 or resp.status in (429, 500, 502, 503, 504))
+
+
 class HttpClient:
+    FALLBACK_TIMEOUT = 4.0
+
     def __init__(self, timeout: float = DEFAULT_TIMEOUT, retries: int = 2) -> None:
         self.timeout = timeout
         self.retries = retries
         self.ncbi_api_key = os.environ.get("NCBI_API_KEY", "").strip()
-        self._last_ncbi_call = 0.0
         self._ncbi_lock = threading.Lock()
         self._next_ncbi_slot = 0.0
         self._pool_lock = threading.Lock()
@@ -661,17 +666,18 @@ class HttpClient:
             return self._ssl_ctx
 
     def _borrow_conn(
-        self, scheme: str, host: str, port: int, timeout: float
+        self, scheme: str, host: str, port: int, timeout: float, force_fresh: bool = False
     ) -> Tuple[http.client.HTTPConnection, bool]:
         key = (scheme, host, port)
-        with self._pool_lock:
-            bucket = self._pools.get(key)
-            if bucket:
-                conn = bucket.pop()
-                conn.timeout = timeout
-                if conn.sock is not None:
-                    conn.sock.settimeout(timeout)
-                return conn, True
+        if not force_fresh:
+            with self._pool_lock:
+                bucket = self._pools.get(key)
+                if bucket:
+                    conn = bucket.pop()
+                    conn.timeout = timeout
+                    if conn.sock is not None:
+                        conn.sock.settimeout(timeout)
+                    return conn, True
         if scheme == "https":
             return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._get_ssl_context()), False
         return http.client.HTTPConnection(host, port, timeout=timeout), False
@@ -697,7 +703,6 @@ class HttpClient:
             wait_s = slot - now
         if wait_s > 0:
             time.sleep(wait_s)
-        self._last_ncbi_call = time.monotonic()
 
     def _single_request_pooled(
         self, url: str, req_headers: Dict[str, str], timeout: float
@@ -718,7 +723,7 @@ class HttpClient:
 
             stale_retried = False
             while True:
-                conn, reused = self._borrow_conn(scheme, host, port, timeout)
+                conn, reused = self._borrow_conn(scheme, host, port, timeout, force_fresh=stale_retried)
                 try:
                     conn.request("GET", target, headers=req_headers)
                     resp = conn.getresponse()
@@ -732,6 +737,7 @@ class HttpClient:
                     http.client.BadStatusLine,
                     BrokenPipeError,
                     ConnectionResetError,
+                    ssl.SSLError,
                 ):
                     try:
                         conn.close()
@@ -790,22 +796,24 @@ class HttpClient:
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             return exc.code, body, url, str(exc.reason), retry_after
 
-    def get_with_options(
+    def get_fallback(
         self,
         url: str,
         headers: Optional[Dict[str, str]] = None,
-        timeout: Optional[float] = None,
-        retries: Optional[int] = None,
+        *,
+        primary_failed_transient: bool = False,
     ) -> HttpResponse:
-        """GET with optional per-call timeout/retries; delegates to get() for subclasses/mocks."""
+        """GET for secondary fallback sources with policy confined inside HttpClient.
+
+        Uses full timeout/retries when the primary source suffered a transient outage (status 0/429/5xx),
+        and bounded timeout with zero retries for best-effort enrichment/fallback otherwise.
+        Delegates to get() for subclasses/test mocks.
+        """
         if type(self) is not HttpClient:
             return self.get(url, headers=headers)
-        return self._get_impl(
-            url,
-            headers=headers,
-            timeout=self.timeout if timeout is None else timeout,
-            retries=self.retries if retries is None else retries,
-        )
+        if primary_failed_transient:
+            return self._get_impl(url, headers=headers, timeout=self.timeout, retries=self.retries)
+        return self._get_impl(url, headers=headers, timeout=min(self.timeout, self.FALLBACK_TIMEOUT), retries=0)
 
     def get(self, url: str, headers: Optional[Dict[str, str]] = None) -> HttpResponse:
         return self._get_impl(url, headers=headers, timeout=self.timeout, retries=self.retries)
@@ -1256,18 +1264,24 @@ def parse_pubmed_xml(xml_text: str) -> Optional[PaperRecord]:
     return _parse_pubmed_article_node(article_node)
 
 
-def parse_pubmed_xml_many(xml_text: str) -> Dict[str, PaperRecord]:
-    """Parse all <PubmedArticle> elements in a batched efetch XML response, keyed by PMID."""
+def _parse_pubmed_xml_many_checked(xml_text: str) -> Tuple[Dict[str, PaperRecord], bool]:
+    """Parse all <PubmedArticle> elements, returning (records_by_pmid, xml_valid)."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
-        return {}
+        return {}, False
     out: Dict[str, PaperRecord] = {}
     for article_node in root.findall(".//PubmedArticle"):
         rec = _parse_pubmed_article_node(article_node)
         if rec.pmid:
             out[rec.pmid] = rec
-    return out
+    return out, True
+
+
+def parse_pubmed_xml_many(xml_text: str) -> Dict[str, PaperRecord]:
+    """Parse all <PubmedArticle> elements in a batched efetch XML response, keyed by PMID."""
+    parsed, _ = _parse_pubmed_xml_many_checked(xml_text)
+    return parsed
 
 
 def fetch_pubmed_pmid(http: HttpClient, pmid: str) -> Tuple[Optional[PaperRecord], HttpResponse]:
@@ -1305,7 +1319,11 @@ def fetch_pubmed_pmids_batch(
         if resp.status != 200:
             all_ok = False
             continue
-        parsed = parse_pubmed_xml_many(resp.body)
+        parsed, xml_ok = _parse_pubmed_xml_many_checked(resp.body)
+        if not xml_ok:
+            # Corrupt/truncated XML: do not cache false misses so single-PMID fallback can retry.
+            all_ok = False
+            continue
         for pid in chunk:
             out[pid] = (parsed.get(pid), resp)
     return out, all_ok
@@ -1350,19 +1368,25 @@ def pubmed_esearch_by_dois_batch(http: HttpClient, dois: Sequence[str]) -> Tuple
     all_ok = True
     for i in range(0, len(unique), 25):
         chunk = unique[i : i + 25]
+        retmax = len(chunk) * 2
         term = " OR ".join(f'"{d}"[DOI]' for d in chunk)
         url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(
-            {"db": "pubmed", "term": term, "retmode": "json", "retmax": str(len(chunk) * 2)}
+            {"db": "pubmed", "term": term, "retmode": "json", "retmax": str(retmax)}
         )
         resp = http.get(url)
         if resp.status != 200:
             all_ok = False
             continue
         try:
-            ids = json.loads(resp.body).get("esearchresult", {}).get("idlist", [])
-        except json.JSONDecodeError:
+            es_res = json.loads(resp.body).get("esearchresult", {})
+            ids = es_res.get("idlist", [])
+            total_count = int(es_res.get("count", len(ids)) or 0)
+        except (json.JSONDecodeError, TypeError, ValueError):
             all_ok = False
             continue
+        if total_count > retmax:
+            # Truncated result set: mark incomplete so missed DOIs still fall back individually.
+            all_ok = False
         for pid in ids:
             sp = str(pid)
             if sp not in seen:
@@ -1508,8 +1532,9 @@ def fetch_epmc(
     http: HttpClient,
     doi: Optional[str] = None,
     pmid: Optional[str] = None,
-    timeout: Optional[float] = None,
-    retries: Optional[int] = None,
+    *,
+    fallback: bool = False,
+    primary_failed_transient: bool = False,
 ) -> Tuple[Optional[PaperRecord], HttpResponse]:
     if doi:
         query = f'DOI:"{doi}"'
@@ -1520,7 +1545,12 @@ def fetch_epmc(
     url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search?" + urllib.parse.urlencode(
         {"query": query, "format": "json", "resultType": "core", "pageSize": "3"}
     )
-    resp = http.get_with_options(url, headers={"Accept": "application/json"}, timeout=timeout, retries=retries)
+    if fallback:
+        resp = http.get_fallback(
+            url, headers={"Accept": "application/json"}, primary_failed_transient=primary_failed_transient
+        )
+    else:
+        resp = http.get(url, headers={"Accept": "application/json"})
     if resp.status != 200:
         return None, resp
     try:
@@ -1544,6 +1574,8 @@ def fetch_epmc_batch(
     dois: Sequence[str] = (),
     pmids: Sequence[str] = (),
     max_workers: int = 4,
+    *,
+    fallback: bool = False,
 ) -> Tuple[
     Dict[str, Tuple[Optional[PaperRecord], HttpResponse]],
     Dict[str, Tuple[Optional[PaperRecord], HttpResponse]],
@@ -1582,7 +1614,10 @@ def fetch_epmc_batch(
         url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search?" + urllib.parse.urlencode(
             {"query": query, "format": "json", "resultType": "core", "pageSize": str(page_size)}
         )
-        resp = http.get(url, headers={"Accept": "application/json"})
+        if fallback:
+            resp = http.get_fallback(url, headers={"Accept": "application/json"})
+        else:
+            resp = http.get(url, headers={"Accept": "application/json"})
         if resp.status != 200:
             return {}, {}
         try:
@@ -1631,12 +1666,13 @@ class FulltextResult:
     source: Optional[str] = None
     error: Optional[str] = None
     is_transient: bool = False
+    missing_body: bool = False
 
 
-def _extract_paragraphs_from_article_node(node: ET.Element, source_label: str) -> Tuple[List[str], Optional[str]]:
+def _extract_paragraphs_from_article_node(node: ET.Element, source_label: str) -> Tuple[List[str], Optional[str], bool]:
     body = node.find(".//body")
     if body is None:
-        return [], f"{source_label} XML has no <body> element (likely not licensed for OA full-text XML)"
+        return [], f"{source_label} XML has no <body> element (likely not licensed for OA full-text XML)", True
 
     paragraphs: List[str] = []
     for p in body.findall(".//p"):
@@ -1644,16 +1680,16 @@ def _extract_paragraphs_from_article_node(node: ET.Element, source_label: str) -
         if len(txt) >= 30:
             paragraphs.append(txt)
     if not paragraphs:
-        return [], f"{source_label} XML <body> contained no text paragraphs"
-    return paragraphs, None
+        return [], f"{source_label} XML <body> contained no text paragraphs", False
+    return paragraphs, None, False
 
 
-def _parse_jats_body_paragraphs(xml_body: str, source_label: str) -> Tuple[List[str], Optional[str]]:
+def _parse_jats_body_paragraphs(xml_body: str, source_label: str) -> Tuple[List[str], Optional[str], bool]:
     """Extract body paragraphs from JATS full-text XML (Europe PMC or NCBI PMC)."""
     try:
         root = ET.fromstring(xml_body)
     except ET.ParseError as exc:
-        return [], f"Failed to parse {source_label} XML: {exc}"
+        return [], f"Failed to parse {source_label} XML: {exc}", False
     return _extract_paragraphs_from_article_node(root, source_label)
 
 
@@ -1679,9 +1715,12 @@ def parse_pmc_xml_many(xml_body: str) -> Dict[str, FulltextResult]:
                 break
         if not pmcid:
             continue
-        paragraphs, err = _extract_paragraphs_from_article_node(art, "NCBI PMC efetch")
+        paragraphs, err, missing_body = _extract_paragraphs_from_article_node(art, "NCBI PMC efetch")
         if err or not paragraphs:
-            out[pmcid] = FulltextResult(error=err or "NCBI PMC efetch returned empty body")
+            out[pmcid] = FulltextResult(
+                error=err or "NCBI PMC efetch returned empty body",
+                missing_body=missing_body,
+            )
         else:
             out[pmcid] = FulltextResult(paragraphs=paragraphs, source="NCBI PMC")
     return out
@@ -1699,16 +1738,19 @@ def _fetch_jats_fulltext(
     url: str,
     source_label: str,
     source_name: str,
-    timeout: Optional[float] = None,
-    retries: Optional[int] = None,
+    *,
+    fallback: bool = False,
+    primary_failed_transient: bool = False,
 ) -> FulltextResult:
-    resp = http.get_with_options(url, timeout=timeout, retries=retries)
+    if fallback:
+        resp = http.get_fallback(url, primary_failed_transient=primary_failed_transient)
+    else:
+        resp = http.get(url)
     if resp.status != 200:
-        transient = resp.status == 0 or resp.status in (429, 500, 502, 503, 504)
-        return FulltextResult(error=_format_http_failure(source_label, resp), is_transient=transient)
-    paragraphs, err = _parse_jats_body_paragraphs(resp.body, source_label)
+        return FulltextResult(error=_format_http_failure(source_label, resp), is_transient=_is_transient_http(resp))
+    paragraphs, err, missing_body = _parse_jats_body_paragraphs(resp.body, source_label)
     if err or not paragraphs:
-        return FulltextResult(error=err or f"{source_label} returned empty body")
+        return FulltextResult(error=err or f"{source_label} returned empty body", missing_body=missing_body)
     return FulltextResult(paragraphs=paragraphs, source=source_name)
 
 
@@ -1718,21 +1760,23 @@ def fetch_epmc_fulltext_paragraphs(http: HttpClient, pmcid: str) -> Tuple[List[s
     return res.paragraphs, res.error
 
 
-def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: Optional[bool] = None) -> FulltextResult:
-    """Fetch OA JATS full-text paragraphs from NCBI PMC first, falling back to Europe PMC."""
-    ncbi_url = (
-        f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={urllib.parse.quote(pmcid)}&retmode=xml"
-    )
-    ncbi_res = _fetch_jats_fulltext(http, ncbi_url, "NCBI PMC efetch", "NCBI PMC")
+def _resolve_fulltext_with_epmc_fallback(
+    http: HttpClient,
+    pmcid: str,
+    ncbi_res: FulltextResult,
+    is_open_access: Optional[bool] = None,
+) -> FulltextResult:
+    """Resolve OA full-text when NCBI PMC did not yield body paragraphs."""
     if ncbi_res.paragraphs:
         return ncbi_res
 
     # Skip Europe PMC fullTextXML if Europe PMC already explicitly marked the article non-OA
     # and NCBI PMC returned valid XML without a <body>.
-    if is_open_access is False and not ncbi_res.is_transient and ncbi_res.error and "no <body>" in ncbi_res.error:
+    if is_open_access is False and ncbi_res.missing_body and not ncbi_res.is_transient:
         return FulltextResult(
             error=f"{ncbi_res.error}; Europe PMC marks article non-open-access",
             is_transient=False,
+            missing_body=True,
         )
 
     epmc_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{urllib.parse.quote(pmcid)}/fullTextXML"
@@ -1741,8 +1785,8 @@ def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: O
         epmc_url,
         "Europe PMC fullTextXML",
         "Europe PMC",
-        timeout=min(http.timeout, 4.0),
-        retries=0,
+        fallback=True,
+        primary_failed_transient=ncbi_res.is_transient,
     )
     if epmc_res.paragraphs:
         return epmc_res
@@ -1751,7 +1795,17 @@ def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: O
     return FulltextResult(
         error="; ".join(errors) if errors else "empty body",
         is_transient=epmc_res.is_transient or ncbi_res.is_transient,
+        missing_body=epmc_res.missing_body or ncbi_res.missing_body,
     )
+
+
+def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: Optional[bool] = None) -> FulltextResult:
+    """Fetch OA JATS full-text paragraphs from NCBI PMC first, falling back to Europe PMC."""
+    ncbi_url = (
+        f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={urllib.parse.quote(pmcid)}&retmode=xml"
+    )
+    ncbi_res = _fetch_jats_fulltext(http, ncbi_url, "NCBI PMC efetch", "NCBI PMC")
+    return _resolve_fulltext_with_epmc_fallback(http, pmcid, ncbi_res, is_open_access=is_open_access)
 
 
 def fetch_oa_fulltext_batch(
@@ -1769,7 +1823,7 @@ def fetch_oa_fulltext_batch(
         return {pid: fetch_oa_fulltext_paragraphs(http, pid, is_open_access=(oa_flags or {}).get(pid))}
 
     out: Dict[str, FulltextResult] = {}
-    need_epmc_fallback: List[str] = []
+    need_fallback: List[Tuple[str, FulltextResult]] = []
 
     for i in range(0, len(unique), PMC_FULLTEXT_BATCH_SIZE):
         chunk = unique[i : i + PMC_FULLTEXT_BATCH_SIZE]
@@ -1780,62 +1834,36 @@ def fetch_oa_fulltext_batch(
         )
         resp = http.get(ncbi_url)
         if resp.status != 200:
-            transient = resp.status == 0 or resp.status in (429, 500, 502, 503, 504)
-            err_msg = _format_http_failure("NCBI PMC efetch", resp)
+            err_res = FulltextResult(
+                error=_format_http_failure("NCBI PMC efetch", resp),
+                is_transient=_is_transient_http(resp),
+            )
             for pid in chunk:
-                out[pid] = FulltextResult(error=err_msg, is_transient=transient)
-                need_epmc_fallback.append(pid)
+                need_fallback.append((pid, err_res))
             continue
 
         parsed = parse_pmc_xml_many(resp.body)
         for pid in chunk:
-            ncbi_res = parsed.get(pid)
-            if ncbi_res and ncbi_res.paragraphs:
+            ncbi_res = parsed.get(pid) or FulltextResult(error="NCBI PMC efetch returned no article for PMCID")
+            if ncbi_res.paragraphs:
                 out[pid] = ncbi_res
             else:
-                ncbi_err = (
-                    ncbi_res.error if ncbi_res and ncbi_res.error else "NCBI PMC efetch returned no article for PMCID"
-                )
-                is_oa = (oa_flags or {}).get(pid)
-                if is_oa is False and "no <body>" in ncbi_err:
-                    out[pid] = FulltextResult(
-                        error=f"{ncbi_err}; Europe PMC marks article non-open-access",
-                        is_transient=False,
-                    )
-                else:
-                    out[pid] = FulltextResult(error=ncbi_err, is_transient=False)
-                    need_epmc_fallback.append(pid)
+                need_fallback.append((pid, ncbi_res))
 
-    if need_epmc_fallback:
+    if need_fallback:
 
-        def _epmc_fallback(pid: str) -> Tuple[str, FulltextResult]:
-            epmc_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{urllib.parse.quote(pid)}/fullTextXML"
-            epmc_res = _fetch_jats_fulltext(
-                http,
-                epmc_url,
-                "Europe PMC fullTextXML",
-                "Europe PMC",
-                timeout=min(http.timeout, 4.0),
-                retries=0,
-            )
-            if epmc_res.paragraphs:
-                return pid, epmc_res
-            prev = out[pid]
-            errors = [e for e in (epmc_res.error, prev.error) if e]
-            return (
-                pid,
-                FulltextResult(
-                    error="; ".join(errors) if errors else "empty body",
-                    is_transient=epmc_res.is_transient or prev.is_transient,
-                ),
+        def _fallback_one(item: Tuple[str, FulltextResult]) -> Tuple[str, FulltextResult]:
+            pid, ncbi_res = item
+            return pid, _resolve_fulltext_with_epmc_fallback(
+                http, pid, ncbi_res, is_open_access=(oa_flags or {}).get(pid)
             )
 
-        if len(need_epmc_fallback) == 1:
-            pid, res = _epmc_fallback(need_epmc_fallback[0])
+        if len(need_fallback) == 1:
+            pid, res = _fallback_one(need_fallback[0])
             out[pid] = res
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(need_epmc_fallback))) as pool:
-                for pid, res in pool.map(_epmc_fallback, need_epmc_fallback):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(need_fallback))) as pool:
+                for pid, res in pool.map(_fallback_one, need_fallback):
                     out[pid] = res
 
     return out
@@ -2434,6 +2462,13 @@ def _number_present_in_text(num_str: str, norm_text_no_commas: str, is_percent: 
     return bool(re.search(pat, norm_text_no_commas))
 
 
+def _normalize_for_quant(text: str) -> Tuple[str, str]:
+    """Return (lowercase_normalized, comma_stripped_normalized) for quantitative token matching."""
+    norm_text = normalize_text(text)
+    norm_no_commas = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm_text)
+    return norm_text.lower(), norm_no_commas
+
+
 def _quant_token_in_norm_text(
     token: str,
     norm_text_low: str,
@@ -2448,9 +2483,8 @@ def _quant_token_in_norm_text(
 
 def quant_token_in_text(token: str, text: str) -> bool:
     """Check if a quantitative token (including all its key numeric values) is present in text."""
-    norm_text = normalize_text(text)
-    norm_no_commas = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm_text)
-    return _quant_token_in_norm_text(token, norm_text.lower(), norm_no_commas)
+    norm_low, norm_no_commas = _normalize_for_quant(text)
+    return _quant_token_in_norm_text(token, norm_low, norm_no_commas)
 
 
 def extract_abstract_numbers(text: str) -> List[str]:
@@ -2509,9 +2543,7 @@ def find_top_matching_sentences(
     for idx, sent in enumerate(text_blocks):
         score = 0
         if quant_tokens:
-            norm_sent = normalize_text(sent)
-            norm_no_commas = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm_sent)
-            norm_low = norm_sent.lower()
+            norm_low, norm_no_commas = _normalize_for_quant(sent)
             for qt in quant_tokens:
                 if _quant_token_in_norm_text(qt, norm_low, norm_no_commas):
                     score += 3
@@ -2554,9 +2586,7 @@ def evaluate_claim(
         )
     else:
         report.abstract_numbers = extract_abstract_numbers(rec.abstract)
-        norm_abs = normalize_text(rec.abstract)
-        abs_no_commas = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm_abs)
-        abs_low = norm_abs.lower()
+        abs_low, abs_no_commas = _normalize_for_quant(rec.abstract)
         for tok in report.extracted_numbers:
             if _quant_token_in_norm_text(tok, abs_low, abs_no_commas):
                 report.matched_numbers.append(tok)
@@ -2615,10 +2645,7 @@ def evaluate_claim(
                 src_tag = f" via {ft_res.source}" if ft_res.source else ""
                 report.fulltext_status = f"fetched ({len(ft_res.paragraphs)} paragraphs from {rec.pmcid}{src_tag})"
                 if report.missing_numbers:
-                    full_joined = "\n".join(ft_res.paragraphs)
-                    norm_full = normalize_text(full_joined)
-                    full_no_commas = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm_full)
-                    full_low = norm_full.lower()
+                    full_low, full_no_commas = _normalize_for_quant("\n".join(ft_res.paragraphs))
                     still_missing: List[str] = []
                     for tok in report.missing_numbers:
                         if _quant_token_in_norm_text(tok, full_low, full_no_commas):
@@ -2677,6 +2704,89 @@ class PrefetchCache:
     pubmed_by_doi: Dict[str, PaperRecord] = field(default_factory=dict)
     esearch_checked_dois: set[str] = field(default_factory=set)
     fulltext_by_pmcid: Dict[str, FulltextResult] = field(default_factory=dict)
+
+    def store_crossref_dois(self, http: HttpClient, dois: Sequence[str], max_workers: int = 4) -> None:
+        unique = list(dict.fromkeys(d for d in dois if d and d.lower() not in self.crossref_by_doi))
+        if not unique:
+            return
+        if len(unique) == 1:
+            rec, resp = fetch_crossref_doi(http, unique[0])
+            self.crossref_by_doi[unique[0].lower()] = (rec, resp)
+            return
+        found, _ = fetch_crossref_dois_batch(http, unique, max_workers=max_workers)
+        self.crossref_by_doi.update(found)
+
+    def store_pubmed_pmids(self, http: HttpClient, pmids: Sequence[str]) -> None:
+        unique = [p for p in dict.fromkeys(pmids) if p and p not in self.pubmed_by_pmid]
+        if not unique:
+            return
+        found, _ = fetch_pubmed_pmids_batch(http, unique)
+        self.pubmed_by_pmid.update(found)
+        for rec, _ in found.values():
+            if rec is not None and rec.doi:
+                self.pubmed_by_doi[rec.doi.lower()] = rec
+
+    def store_epmc_batch(
+        self,
+        http: HttpClient,
+        dois: Sequence[str] = (),
+        pmids: Sequence[str] = (),
+        max_workers: int = 4,
+        *,
+        fallback: bool = True,
+    ) -> List[str]:
+        by_doi, by_pmid = fetch_epmc_batch(http, dois=dois, pmids=pmids, max_workers=max_workers, fallback=fallback)
+        self.epmc_by_doi.update(by_doi)
+        self.epmc_by_pmid.update(by_pmid)
+        return [
+            rec.pmid
+            for rec, _ in by_doi.values()
+            if rec is not None and rec.pmid and rec.pmid not in self.pubmed_by_pmid
+        ]
+
+    def crossref_record(self, doi: Optional[str]) -> Optional[PaperRecord]:
+        if not doi:
+            return None
+        pair = self.crossref_by_doi.get(doi.lower())
+        return pair[0] if pair else None
+
+    def pubmed_record(self, doi: Optional[str], pmid: Optional[str]) -> Optional[PaperRecord]:
+        if pmid and pmid in self.pubmed_by_pmid:
+            return self.pubmed_by_pmid[pmid][0]
+        if doi and not pmid:
+            return self.pubmed_by_doi.get(doi.lower())
+        return None
+
+    def epmc_record(self, doi: Optional[str], pmid: Optional[str]) -> Optional[PaperRecord]:
+        if doi and doi.lower() in self.epmc_by_doi:
+            rec = self.epmc_by_doi[doi.lower()][0]
+            if rec is not None:
+                return rec
+        if pmid and pmid in self.epmc_by_pmid:
+            return self.epmc_by_pmid[pmid][0]
+        return None
+
+    def oa_flags_by_pmcid(self) -> Dict[str, Optional[bool]]:
+        flags: Dict[str, Optional[bool]] = {}
+        for store in (self.epmc_by_doi.values(), self.epmc_by_pmid.values()):
+            for rec, _ in store:
+                if rec is not None and rec.pmcid and rec.is_open_access is not None:
+                    flags[rec.pmcid.strip().upper()] = rec.is_open_access
+        return flags
+
+
+def _run_tasks(tasks: Sequence[Any], workers: int) -> None:
+    """Run zero-arg callables sequentially when workers == 1, or concurrently otherwise."""
+    if not tasks:
+        return
+    if workers <= 1 or len(tasks) == 1:
+        for fn in tasks:
+            fn()
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
+        futs = [pool.submit(fn) for fn in tasks]
+        for f in futs:
+            f.result()
 
 
 def _search_did_you_mean(http: HttpClient, title: Optional[str], author: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -2836,49 +2946,66 @@ def verify_citation(
                 esearch_ran = True
                 f_esearch = pool.submit(pubmed_esearch_by_doi, http, clean_doi)
 
-            primary_futs = [f for f in (f_cr, f_pm, f_esearch) if f is not None]
-            for fut in concurrent.futures.as_completed(primary_futs):
-                if fut is f_cr:
-                    cr_rec, cr_resp = fut.result()
-                elif fut is f_esearch:
-                    linked_pmid = fut.result()
-                    if linked_pmid and f_pm_enrich is None and pm_rec is None:
-                        if prefetched is not None and linked_pmid in prefetched.pubmed_by_pmid:
-                            pm_rec, _ = prefetched.pubmed_by_pmid[linked_pmid]
-                        else:
-                            f_pm_enrich = pool.submit(fetch_pubmed_pmid, http, linked_pmid)
-                elif fut is f_pm:
-                    pm_rec, pm_resp = fut.result()
-                    # Pipeline PMID-only Crossref & OA fulltext immediately!
-                    if clean_pmid and not clean_doi and pm_rec is not None:
-                        if pm_rec.doi and f_cr_enrich is None and cr_rec is None:
-                            if prefetched is not None and pm_rec.doi.lower() in prefetched.crossref_by_doi:
-                                cr_rec, _ = prefetched.crossref_by_doi[pm_rec.doi.lower()]
-                            else:
-                                f_cr_enrich = pool.submit(fetch_crossref_doi, http, pm_rec.doi)
-                        if want_fulltext and pm_rec.pmcid and f_ft_eager is None:
-                            pmcid_u = pm_rec.pmcid.strip().upper()
-                            if prefetched is not None and pmcid_u in prefetched.fulltext_by_pmcid:
-                                prefetched_ft = prefetched.fulltext_by_pmcid[pmcid_u]
-                            else:
-                                eager_ft_pmcid = pmcid_u
-                                f_ft_eager = pool.submit(
-                                    fetch_oa_fulltext_paragraphs,
-                                    http,
-                                    pm_rec.pmcid,
-                                    pm_rec.is_open_access,
-                                )
-
-            if f_pm_enrich is not None:
-                pm_extra, _ = f_pm_enrich.result()
-                if pm_extra is not None and (
-                    not pm_extra.doi or not clean_doi or pm_extra.doi.lower() == clean_doi.lower()
+            def _maybe_start_eager_ft(rec: Optional[PaperRecord]) -> None:
+                nonlocal prefetched_ft, f_ft_eager, eager_ft_pmcid
+                if (
+                    not want_fulltext
+                    or rec is None
+                    or not rec.pmcid
+                    or f_ft_eager is not None
+                    or prefetched_ft is not None
                 ):
-                    pm_rec = pm_extra
-            if f_cr_enrich is not None:
-                cr_extra, _ = f_cr_enrich.result()
-                if cr_extra is not None:
-                    cr_rec = cr_extra
+                    return
+                pmcid_u = rec.pmcid.strip().upper()
+                if prefetched is not None and pmcid_u in prefetched.fulltext_by_pmcid:
+                    prefetched_ft = prefetched.fulltext_by_pmcid[pmcid_u]
+                else:
+                    eager_ft_pmcid = pmcid_u
+                    f_ft_eager = pool.submit(
+                        fetch_oa_fulltext_paragraphs,
+                        http,
+                        rec.pmcid,
+                        rec.is_open_access,
+                    )
+
+            pending: set[concurrent.futures.Future[Any]] = {f for f in (f_cr, f_pm, f_esearch) if f is not None}
+            while pending:
+                done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                for fut in done:
+                    if fut is f_cr:
+                        cr_rec, cr_resp = fut.result()
+                    elif fut is f_esearch:
+                        linked_pmid = fut.result()
+                        if linked_pmid and f_pm_enrich is None and pm_rec is None:
+                            if prefetched is not None and linked_pmid in prefetched.pubmed_by_pmid:
+                                pm_rec, _ = prefetched.pubmed_by_pmid[linked_pmid]
+                                _maybe_start_eager_ft(pm_rec)
+                            else:
+                                f_pm_enrich = pool.submit(fetch_pubmed_pmid, http, linked_pmid)
+                                pending.add(f_pm_enrich)
+                    elif fut is f_pm_enrich:
+                        pm_extra, _ = fut.result()
+                        if pm_extra is not None and (
+                            not pm_extra.doi or not clean_doi or pm_extra.doi.lower() == clean_doi.lower()
+                        ):
+                            pm_rec = pm_extra
+                            _maybe_start_eager_ft(pm_rec)
+                    elif fut is f_pm:
+                        pm_rec, pm_resp = fut.result()
+                        # Pipeline PMID-only Crossref & OA fulltext immediately!
+                        if clean_pmid and not clean_doi and pm_rec is not None:
+                            if pm_rec.doi and f_cr_enrich is None and cr_rec is None:
+                                if prefetched is not None and pm_rec.doi.lower() in prefetched.crossref_by_doi:
+                                    cr_rec, _ = prefetched.crossref_by_doi[pm_rec.doi.lower()]
+                                else:
+                                    f_cr_enrich = pool.submit(fetch_crossref_doi, http, pm_rec.doi)
+                                    pending.add(f_cr_enrich)
+                            _maybe_start_eager_ft(pm_rec)
+                    elif fut is f_cr_enrich:
+                        cr_extra, _ = fut.result()
+                        if cr_extra is not None:
+                            cr_rec = cr_extra
+
             if f_ft_eager is not None:
                 prefetched_ft = f_ft_eager.result()
 
@@ -2888,34 +3015,46 @@ def verify_citation(
             cr_rec is None
             or (not clean_pmid and pm_rec is None)
             or (bool(cit.claim) and not (pm_rec and pm_rec.abstract) and not (cr_rec and cr_rec.abstract))
+            or (want_fulltext and not (pm_rec and pm_rec.pmcid))
         )
         if need_epmc_for_doi:
-            epmc_timeout = http.timeout if (cr_resp and cr_resp.status == 0) else min(http.timeout, 3.5)
-            epmc_retries = http.retries if (cr_resp and cr_resp.status == 0) else 0
+            cr_transient = _is_transient_http(cr_resp)
             # When Crossref returned a definitive 404 and title is available, overlap EPMC check with DID_YOU_MEAN!
             if cr_rec is None and cr_resp is not None and cr_resp.status == 404 and cit.title and not did_you_mean:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                    f_ep = pool.submit(fetch_epmc, http, clean_doi, None, epmc_timeout, epmc_retries)
+                    f_ep = pool.submit(
+                        fetch_epmc, http, clean_doi, None, fallback=True, primary_failed_transient=cr_transient
+                    )
                     f_dym = pool.submit(_search_did_you_mean, http, cit.title, cit.author)
                     epmc_doi_rec, epmc_doi_resp = f_ep.result()
                     if epmc_doi_rec is None:
                         did_you_mean = f_dym.result()
             else:
                 epmc_doi_rec, epmc_doi_resp = fetch_epmc(
-                    http, doi=clean_doi, timeout=epmc_timeout, retries=epmc_retries
+                    http, doi=clean_doi, fallback=True, primary_failed_transient=cr_transient
                 )
 
     if clean_pmid and epmc_pmid_rec is None and (prefetched is None or clean_pmid not in prefetched.epmc_by_pmid):
         already_covered = epmc_doi_rec is not None and epmc_doi_rec.pmid == clean_pmid
-        need_epmc_for_pmid = pm_rec is None or (
-            bool(cit.claim) and not pm_rec.abstract and not (cr_rec and cr_rec.abstract)
+        need_epmc_for_pmid = (
+            pm_rec is None
+            or (bool(cit.claim) and not pm_rec.abstract and not (cr_rec and cr_rec.abstract))
+            or (want_fulltext and not pm_rec.pmcid)
         )
         if not already_covered and need_epmc_for_pmid:
-            epmc_timeout = http.timeout if (pm_resp and pm_resp.status == 0) else min(http.timeout, 3.5)
-            epmc_retries = http.retries if (pm_resp and pm_resp.status == 0) else 0
-            epmc_pmid_rec, _ = fetch_epmc(http, pmid=clean_pmid, timeout=epmc_timeout, retries=epmc_retries)
+            epmc_pmid_rec, _ = fetch_epmc(
+                http,
+                pmid=clean_pmid,
+                fallback=True,
+                primary_failed_transient=_is_transient_http(pm_resp),
+            )
 
     doi_merged = merge_records([cr_rec, epmc_doi_rec])
+    # Fail-closed: if a DOI-only lookup failed both Crossref and Europe PMC, never treat
+    # speculative parallel PubMed esearch output as a resolved DOI record alongside DOI_NOT_FOUND.
+    if clean_doi and not clean_pmid and doi_merged is None:
+        pm_rec = None
+        prefetched_ft = None
     pmid_merged = merge_records([pm_rec, epmc_pmid_rec])
 
     # If DOI had syntax error but cleaned candidate resolved, enrich the syntax diagnostic with proof!
@@ -3190,31 +3329,17 @@ def verify_citations_batch(
     seen_dois: set[str] = set()
     unique_pmids: List[str] = []
     seen_pmids: set[str] = set()
-    ft_dois: set[str] = set()
-    ft_pmids: set[str] = set()
 
     for cit in citations:
-        c_doi: Optional[str] = None
-        if cit.doi is not None and cit.doi != "":
-            c_doi, _ = validate_doi(cit.doi)
-        c_pmid: Optional[str] = None
-        if cit.pmid is not None and cit.pmid != "":
-            c_pmid, _ = validate_pmid(cit.pmid)
-        want_ft = bool(cit.claim and cit.fulltext)
-        parsed_ids.append((c_doi, c_pmid, want_ft))
-        if c_doi:
-            low = c_doi.lower()
-            if low not in seen_dois:
-                seen_dois.add(low)
-                unique_dois.append(c_doi)
-            if want_ft:
-                ft_dois.add(low)
-        if c_pmid:
-            if c_pmid not in seen_pmids:
-                seen_pmids.add(c_pmid)
-                unique_pmids.append(c_pmid)
-            if want_ft:
-                ft_pmids.add(c_pmid)
+        c_doi = validate_doi(cit.doi)[0] if cit.doi is not None and cit.doi != "" else None
+        c_pmid = validate_pmid(cit.pmid)[0] if cit.pmid is not None and cit.pmid != "" else None
+        parsed_ids.append((c_doi, c_pmid, bool(cit.claim and cit.fulltext)))
+        if c_doi and c_doi.lower() not in seen_dois:
+            seen_dois.add(c_doi.lower())
+            unique_dois.append(c_doi)
+        if c_pmid and c_pmid not in seen_pmids:
+            seen_pmids.add(c_pmid)
+            unique_pmids.append(c_pmid)
 
     cache = PrefetchCache()
     doi_only_list = [
@@ -3223,144 +3348,64 @@ def verify_citations_batch(
     esearch_discovered_pmids: List[str] = []
 
     # Phase 1: Parallel batch prefetch across Crossref + PubMed (esearch for DOIs, efetch for user PMIDs)
-    # Europe PMC is deferred to targeted fallback only for unresolved/incomplete items, eliminating EBI stalls!
-    def _phase1_crossref() -> None:
-        if not unique_dois:
-            return
-        if len(unique_dois) == 1:
-            rec, resp = fetch_crossref_doi(http, unique_dois[0])
-            cache.crossref_by_doi[unique_dois[0].lower()] = (rec, resp)
-            return
-        found, _ = fetch_crossref_dois_batch(http, unique_dois, max_workers=min(workers, 4))
-        for k, val in found.items():
-            cache.crossref_by_doi[k] = val
-
-    def _phase1_pubmed_esearch() -> None:
+    def _phase1_esearch() -> None:
         if not doi_only_list:
             return
         ids, ok = pubmed_esearch_by_dois_batch(http, doi_only_list)
         if ok:
-            for d in doi_only_list:
-                cache.esearch_checked_dois.add(d.lower())
+            cache.esearch_checked_dois.update(d.lower() for d in doi_only_list)
         esearch_discovered_pmids.extend(ids)
 
-    def _phase1_pubmed_user_pmids() -> None:
-        if not unique_pmids:
-            return
-        found, _ = fetch_pubmed_pmids_batch(http, unique_pmids)
-        cache.pubmed_by_pmid.update(found)
-        for rec, _ in found.values():
-            if rec is not None and rec.doi:
-                cache.pubmed_by_doi[rec.doi.lower()] = rec
+    _run_tasks(
+        [
+            lambda: cache.store_crossref_dois(http, unique_dois, max_workers=min(workers, 4)),
+            _phase1_esearch,
+            lambda: cache.store_pubmed_pmids(http, unique_pmids),
+        ],
+        workers=min(workers, 3),
+    )
 
-    if workers == 1:
-        _phase1_crossref()
-        _phase1_pubmed_esearch()
-        _phase1_pubmed_user_pmids()
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, 3)) as pool:
-            futs = [
-                pool.submit(_phase1_crossref),
-                pool.submit(_phase1_pubmed_esearch),
-                pool.submit(_phase1_pubmed_user_pmids),
-            ]
-            for f in futs:
-                f.result()
+    # Phase 2: Parallel PubMed efetch (DOI-discovered PMIDs) + Crossref enrich (PMID-discovered DOIs) + early fulltext
+    discovered_dois = [
+        pm_rec.doi
+        for c_doi, c_pmid, _ in parsed_ids
+        if c_pmid and not c_doi and (pm_rec := cache.pubmed_record(None, c_pmid)) and pm_rec.doi
+    ]
+    early_pmcids = [
+        pm_r.pmcid.strip().upper()
+        for _, c_pmid, want_ft in parsed_ids
+        if want_ft and c_pmid and (pm_r := cache.pubmed_record(None, c_pmid)) and pm_r.pmcid
+    ]
 
-    # Phase 2: Parallel batch PubMed efetch (for DOI-discovered PMIDs) + Crossref enrich (for PMID-discovered DOIs)
-    # + targeted Europe PMC batch ONLY for DOIs/PMIDs that still need resolution or fallback!
-    discovered_pmids = [pid for pid in dict.fromkeys(esearch_discovered_pmids) if pid not in cache.pubmed_by_pmid]
-    discovered_dois: List[str] = []
-    for c_doi, c_pmid, _ in parsed_ids:
-        if c_pmid and not c_doi:
-            pm_pair = cache.pubmed_by_pmid.get(c_pmid)
-            pm_rec = pm_pair[0] if pm_pair else None
-            if pm_rec and pm_rec.doi and pm_rec.doi.lower() not in cache.crossref_by_doi:
-                discovered_dois.append(pm_rec.doi)
+    _run_tasks(
+        [
+            lambda: cache.store_pubmed_pmids(http, esearch_discovered_pmids),
+            lambda: cache.store_crossref_dois(http, discovered_dois, max_workers=min(workers, 4)),
+            lambda: cache.fulltext_by_pmcid.update(
+                fetch_oa_fulltext_batch(http, early_pmcids, max_workers=min(workers, 4))
+            ),
+        ],
+        workers=min(workers, 3),
+    )
 
-    def _phase2_pubmed_efetch() -> None:
-        if not discovered_pmids:
-            return
-        found, _ = fetch_pubmed_pmids_batch(http, discovered_pmids)
-        cache.pubmed_by_pmid.update(found)
-        for rec, _ in found.values():
-            if rec is not None and rec.doi:
-                cache.pubmed_by_doi[rec.doi.lower()] = rec
-
-    def _phase2_crossref_enrich() -> None:
-        if not discovered_dois:
-            return
-        if len(discovered_dois) == 1:
-            rec, resp = fetch_crossref_doi(http, discovered_dois[0])
-            cache.crossref_by_doi[discovered_dois[0].lower()] = (rec, resp)
-            return
-        found, _ = fetch_crossref_dois_batch(http, discovered_dois, max_workers=min(workers, 4))
-        for k, val in found.items():
-            cache.crossref_by_doi[k] = val
-
-    # User-supplied PMIDs may already have PMCIDs for fulltext — kick off in parallel if any!
-    early_pmcids: List[str] = []
-    for c_doi, c_pmid, want_ft in parsed_ids:
-        if want_ft and c_pmid and c_pmid in cache.pubmed_by_pmid:
-            pm_r = cache.pubmed_by_pmid[c_pmid][0]
-            if pm_r and pm_r.pmcid:
-                early_pmcids.append(pm_r.pmcid.strip().upper())
-
-    def _phase2_early_fulltext() -> None:
-        if not early_pmcids:
-            return
-        cache.fulltext_by_pmcid.update(fetch_oa_fulltext_batch(http, early_pmcids, max_workers=min(workers, 4)))
-
-    if workers == 1:
-        _phase2_pubmed_efetch()
-        _phase2_crossref_enrich()
-        _phase2_early_fulltext()
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, 3)) as pool:
-            futs = [
-                pool.submit(_phase2_pubmed_efetch),
-                pool.submit(_phase2_crossref_enrich),
-                pool.submit(_phase2_early_fulltext),
-            ]
-            for f in futs:
-                f.result()
-
-    # Phase 2b: Targeted Europe PMC batch ONLY for items that Crossref/PubMed missed (unresolved DOI/PMID,
-    # missing abstract for a claim, or missing PMCID for --fulltext when PubMed had no record).
+    # Phase 2b/2c: Targeted Europe PMC fallback batch (including missing PMCIDs for --fulltext)
+    # overlapped in parallel with NCBI PMC batch fulltext for already-known PMCIDs.
     epmc_fallback_dois: List[str] = []
     epmc_fallback_pmids: List[str] = []
-    for cit, (c_doi, c_pmid, want_ft) in zip(citations, parsed_ids):
-        if c_doi:
-            d_low = c_doi.lower()
-            cr_r = cache.crossref_by_doi[d_low][0] if d_low in cache.crossref_by_doi else None
-            pm_r = (
-                cache.pubmed_by_doi.get(d_low)
-                if not c_pmid
-                else (cache.pubmed_by_pmid[c_pmid][0] if c_pmid in cache.pubmed_by_pmid else None)
-            )
-            if (
-                cr_r is None
-                or (not c_pmid and pm_r is None)
-                or (bool(cit.claim) and not (pm_r and pm_r.abstract) and not (cr_r and cr_r.abstract))
-            ):
-                epmc_fallback_dois.append(c_doi)
-        if c_pmid:
-            pm_r = cache.pubmed_by_pmid[c_pmid][0] if c_pmid in cache.pubmed_by_pmid else None
-            if pm_r is None:
-                epmc_fallback_pmids.append(c_pmid)
-
-    # Phase 2c: Batch-fetch OA fulltext for ALL discovered PMCIDs in parallel with any EPMC fallback!
     needed_pmcids: List[str] = []
-    oa_flags: Dict[str, Optional[bool]] = {}
-    for c_doi, c_pmid, want_ft in parsed_ids:
-        if not want_ft:
-            continue
-        pm_r: Optional[PaperRecord] = None
-        if c_pmid and c_pmid in cache.pubmed_by_pmid:
-            pm_r = cache.pubmed_by_pmid[c_pmid][0]
-        elif c_doi and c_doi.lower() in cache.pubmed_by_doi:
-            pm_r = cache.pubmed_by_doi[c_doi.lower()]
-        if pm_r and pm_r.pmcid:
+    for cit, (c_doi, c_pmid, want_ft) in zip(citations, parsed_ids):
+        cr_r = cache.crossref_record(c_doi)
+        pm_r = cache.pubmed_record(c_doi, c_pmid)
+        if c_doi and (
+            cr_r is None
+            or (not c_pmid and pm_r is None)
+            or (bool(cit.claim) and not (pm_r and pm_r.abstract) and not (cr_r and cr_r.abstract))
+            or (want_ft and not (pm_r and pm_r.pmcid))
+        ):
+            epmc_fallback_dois.append(c_doi)
+        if c_pmid and (pm_r is None or (want_ft and not pm_r.pmcid)):
+            epmc_fallback_pmids.append(c_pmid)
+        if want_ft and pm_r and pm_r.pmcid:
             pmcid_u = pm_r.pmcid.strip().upper()
             if pmcid_u not in cache.fulltext_by_pmcid:
                 needed_pmcids.append(pmcid_u)
@@ -3368,59 +3413,43 @@ def verify_citations_batch(
     def _phase2c_epmc_fallback() -> None:
         if not epmc_fallback_dois and not epmc_fallback_pmids:
             return
-        by_doi, by_pmid = fetch_epmc_batch(
-            http, dois=epmc_fallback_dois, pmids=epmc_fallback_pmids, max_workers=min(workers, 4)
+        epmc_new_pmids = cache.store_epmc_batch(
+            http,
+            dois=epmc_fallback_dois,
+            pmids=epmc_fallback_pmids,
+            max_workers=min(workers, 4),
+            fallback=True,
         )
-        cache.epmc_by_doi.update(by_doi)
-        cache.epmc_by_pmid.update(by_pmid)
-        # If Europe PMC discovered PMIDs we haven't fetched from PubMed yet, batch-fetch them now!
-        epmc_new_pmids = [
-            rec.pmid
-            for rec, _ in by_doi.values()
-            if rec is not None and rec.pmid and rec.pmid not in cache.pubmed_by_pmid
-        ]
         if epmc_new_pmids:
-            found, _ = fetch_pubmed_pmids_batch(http, epmc_new_pmids)
-            cache.pubmed_by_pmid.update(found)
-            for rec, _ in found.values():
-                if rec is not None and rec.doi:
-                    cache.pubmed_by_doi[rec.doi.lower()] = rec
+            cache.store_pubmed_pmids(http, epmc_new_pmids)
 
-    def _phase2c_fulltext() -> None:
-        if not needed_pmcids:
-            return
-        cache.fulltext_by_pmcid.update(
-            fetch_oa_fulltext_batch(http, needed_pmcids, oa_flags=oa_flags, max_workers=min(workers, 4))
-        )
+    _run_tasks(
+        [
+            _phase2c_epmc_fallback,
+            lambda: cache.fulltext_by_pmcid.update(
+                fetch_oa_fulltext_batch(http, needed_pmcids, max_workers=min(workers, 4))
+            ),
+        ],
+        workers=min(workers, 2),
+    )
 
-    if workers == 1:
-        _phase2c_epmc_fallback()
-        _phase2c_fulltext()
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            f1 = pool.submit(_phase2c_epmc_fallback)
-            f2 = pool.submit(_phase2c_fulltext)
-            f1.result()
-            f2.result()
-
-    # If EPMC fallback revealed any extra PMCIDs for --fulltext, batch-fetch them now
-    extra_pmcids: List[str] = []
-    for c_doi, c_pmid, want_ft in parsed_ids:
-        if not want_ft:
-            continue
-        epmc_r: Optional[PaperRecord] = None
-        if c_doi and c_doi.lower() in cache.epmc_by_doi:
-            epmc_r = cache.epmc_by_doi[c_doi.lower()][0]
-        elif c_pmid and c_pmid in cache.epmc_by_pmid:
-            epmc_r = cache.epmc_by_pmid[c_pmid][0]
-        if epmc_r and epmc_r.pmcid:
-            pmcid_u = epmc_r.pmcid.strip().upper()
-            oa_flags[pmcid_u] = epmc_r.is_open_access
-            if pmcid_u not in cache.fulltext_by_pmcid:
-                extra_pmcids.append(pmcid_u)
+    # If Europe PMC fallback revealed any extra PMCIDs for --fulltext, batch-fetch them with OA flags
+    extra_pmcids = [
+        epmc_r.pmcid.strip().upper()
+        for c_doi, c_pmid, want_ft in parsed_ids
+        if want_ft
+        and (epmc_r := cache.epmc_record(c_doi, c_pmid))
+        and epmc_r.pmcid
+        and epmc_r.pmcid.strip().upper() not in cache.fulltext_by_pmcid
+    ]
     if extra_pmcids:
         cache.fulltext_by_pmcid.update(
-            fetch_oa_fulltext_batch(http, extra_pmcids, oa_flags=oa_flags, max_workers=min(workers, 4))
+            fetch_oa_fulltext_batch(
+                http,
+                extra_pmcids,
+                oa_flags=cache.oa_flags_by_pmcid(),
+                max_workers=min(workers, 4),
+            )
         )
 
     # Phase 3: Final verification (concurrent for any remaining fallbacks / DID_YOU_MEAN), preserving input order

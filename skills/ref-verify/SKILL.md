@@ -25,7 +25,7 @@ Verify every scientific reference and quantitative claim against live primary-so
    - `SUPPORTED` — every directional and numerical statement matches the fetched primary text (including exact arithmetic equivalents like RRR = 1 − HR).
    - `PARTIAL` — direction holds, while one or more numbers, subgroups, or caveats differ; revise the claim to match the primary text.
    - `CONTRADICTED` — fetched text refutes the direction, significance, or values; rewrite or replace the claim.
-   - `NEEDS_FULLTEXT` — numbers do not appear in the abstract and Open Access full text (Europe PMC / NCBI PMC) is unavailable; inspect the full-text PDF before treating the number as verified, or flag it explicitly to the user.
+   - `NEEDS_FULLTEXT` — numbers do not appear in the abstract and Open Access full text (NCBI PMC / Europe PMC) is unavailable; inspect the full-text PDF before treating the number as verified, or flag it explicitly to the user.
 
 4. **Re-verify after edits.**
    Re-run `ref-verify` on every modified citation or scanned file after applying fixes.

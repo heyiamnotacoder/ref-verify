@@ -1002,6 +1002,187 @@ class TestBatchCLI(unittest.TestCase):
         args_s = parser.parse_args(["scan", "paper.md", "--workers", "1"])
         self.assertEqual(args_s.workers, 1)
 
+    def test_doi_not_found_does_not_resolve_from_speculative_esearch(self) -> None:
+        # Regression: parallel pubmed_esearch_by_doi must not yield a non-null resolved record when Crossref+EPMC miss
+        http = FakeHttpClient(
+            [
+                ("api.crossref.org/works/10.1056/FAKE99999", rv.HttpResponse(404, "", "cr", "HTTP 404 Not Found")),
+                (
+                    "europepmc/webservices/rest/search",
+                    rv.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                ),
+                (
+                    "esearch.fcgi",
+                    rv.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
+                ),
+                ("efetch.fcgi?db=pubmed&id=31535829", rv.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+            ]
+        )
+        res = rv.verify_citation(rv.CitationInput(doi="10.1056/FAKE99999", year="2020"), http)
+        self.assertEqual(res.status, "FAIL")
+        self.assertIsNone(res.resolved)
+        self.assertEqual([d.code for d in res.diagnostics], ["DOI_NOT_FOUND"])
+
+    def test_corrupt_batch_pubmed_xml_falls_back_to_single_pmid(self) -> None:
+        http = FakeHttpClient(
+            [
+                ("efetch.fcgi?db=pubmed&id=31535829,26378978", rv.HttpResponse(200, "<PubmedArticleSet><broken", "pm")),
+                ("efetch.fcgi?db=pubmed&id=31535829", rv.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm1")),
+                ("efetch.fcgi?db=pubmed&id=26378978", rv.HttpResponse(200, OTHER_PAPER_PUBMED_XML, "pm2")),
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1911303",
+                    rv.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr1"),
+                ),
+                ("api.crossref.org/works/10.1056/NEJMoa1504720", rv.HttpResponse(404, "", "cr2", "HTTP 404")),
+                (
+                    "europepmc/webservices/rest/search",
+                    rv.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                ),
+            ]
+        )
+        results = rv.verify_citations_batch(
+            [rv.CitationInput(pmid="31535829", year="2019"), rv.CitationInput(pmid="26378978", year="2015")],
+            http,
+            max_workers=2,
+        )
+        self.assertEqual([r.status for r in results], ["PASS", "PASS"])
+        self.assertTrue(all(r.resolved is not None for r in results))
+
+    def test_truncated_batch_esearch_marks_incomplete(self) -> None:
+        http = FakeHttpClient(
+            [
+                (
+                    "esearch.fcgi",
+                    rv.HttpResponse(
+                        200,
+                        json.dumps({"esearchresult": {"count": "99", "idlist": ["31535829", "26378978"]}}),
+                        "es",
+                    ),
+                )
+            ]
+        )
+        ids, ok = rv.pubmed_esearch_by_dois_batch(http, ["10.1056/NEJMoa1911303", "10.1056/NEJMoa1504720"])
+        self.assertEqual(ids, ["31535829", "26378978"])
+        self.assertFalse(ok)
+
+    def test_fulltext_discovers_epmc_only_pmcid_when_pubmed_lacks_pmcid(self) -> None:
+        # DAPA_HF_PUBMED_XML has no PMCID; Europe PMC provides PMC7654321
+        epmc_json = {
+            "resultList": {
+                "result": [
+                    {
+                        "doi": "10.1056/NEJMoa1911303",
+                        "pmid": "31535829",
+                        "pmcid": "PMC7654321",
+                        "isOpenAccess": "Y",
+                        "title": "Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction",
+                    }
+                ]
+            }
+        }
+        ft_xml = (
+            "<article><body><p>Subgroup analysis included 1983 patients with hazard ratio 0.75.</p></body></article>"
+        )
+        http = FakeHttpClient(
+            [
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1911303",
+                    rv.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                ),
+                (
+                    "esearch.fcgi",
+                    rv.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
+                ),
+                ("efetch.fcgi?db=pubmed&id=31535829", rv.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("europepmc/webservices/rest/search", rv.HttpResponse(200, json.dumps(epmc_json), "epmc")),
+                ("efetch.fcgi?db=pmc&id=PMC7654321", rv.HttpResponse(200, ft_xml, "ft")),
+            ]
+        )
+        res = rv.verify_citation(
+            rv.CitationInput(
+                doi="10.1056/NEJMoa1911303",
+                claim="Subgroup N=1983 had HR 0.75.",
+                fulltext=True,
+            ),
+            http,
+        )
+        self.assertEqual(res.status, "PASS")
+        assert res.claim_report is not None
+        self.assertEqual(res.claim_report.missing_numbers, [])
+
+    def test_stale_pool_socket_retries_with_fresh_connection_and_handles_ssl_error(self) -> None:
+        import ssl
+
+        client = rv.HttpClient(timeout=5.0, retries=0)
+        borrow_calls: List[bool] = []
+
+        class _BadConn:
+            def __init__(self, exc: Exception) -> None:
+                self._exc = exc
+                self.closed = False
+
+            def request(self, *args: object, **kwargs: object) -> None:
+                raise self._exc
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _GoodResp:
+            status = 200
+            reason = "OK"
+            will_close = True
+
+            class _Headers:
+                def get(self, k: str, default: Optional[str] = None) -> Optional[str]:
+                    return default
+
+                def get_content_charset(self) -> str:
+                    return "utf-8"
+
+            headers = _Headers()
+
+            def read(self) -> bytes:
+                return b"ok"
+
+        class _GoodConn:
+            def request(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def getresponse(self) -> _GoodResp:
+                return _GoodResp()
+
+            def close(self) -> None:
+                pass
+
+        bad = _BadConn(ssl.SSLError("EOF occurred in violation of protocol"))
+        good = _GoodConn()
+
+        def fake_borrow(scheme: str, host: str, port: int, timeout: float, force_fresh: bool = False):  # type: ignore[no-untyped-def]
+            borrow_calls.append(force_fresh)
+            if not force_fresh:
+                return bad, True
+            return good, False
+
+        with mock.patch.object(client, "_borrow_conn", side_effect=fake_borrow):
+            status, body, _, _, _ = client._single_request_pooled("https://example.org/test", {}, 5.0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, "ok")
+        self.assertEqual(borrow_calls, [False, True])
+        self.assertTrue(bad.closed)
+
+    def test_http_client_get_fallback_policy(self) -> None:
+        client = rv.HttpClient(timeout=12.0, retries=2)
+        seen: List[tuple[float, int]] = []
+
+        def fake_impl(url: str, headers: Optional[Dict[str, str]], timeout: float, retries: int) -> rv.HttpResponse:
+            seen.append((timeout, retries))
+            return rv.HttpResponse(200, "{}", url)
+
+        with mock.patch.object(client, "_get_impl", side_effect=fake_impl):
+            client.get_fallback("https://example.org/a", primary_failed_transient=False)
+            client.get_fallback("https://example.org/b", primary_failed_transient=True)
+        self.assertEqual(seen, [(client.FALLBACK_TIMEOUT, 0), (12.0, 2)])
+
 
 if __name__ == "__main__":
     unittest.main()

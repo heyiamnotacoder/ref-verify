@@ -216,17 +216,19 @@ CLAIM_CHECK:
 
 ## Scope & Limitations
 
-- **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Open Access full text (Europe PMC / NCBI PMC)—never from model memory.
-- **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without an Open Access XML copy in Europe PMC or NCBI PMC, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
+- **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Open Access full text (NCBI PMC / Europe PMC)—never from model memory.
+- **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without an Open Access XML copy in NCBI PMC or Europe PMC, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
 
 ---
 
-## Optional NCBI API Key
+## Optional Environment Variables
 
-PubMed E-utilities permits 3 requests/second without an API key and 10 requests/second with one. `ref-verify` paces requests automatically and uses `NCBI_API_KEY` when set:
+- **`NCBI_API_KEY`**: PubMed E-utilities permits 3 requests/second without an API key and 10 requests/second with one. `ref-verify` paces requests automatically and uses `NCBI_API_KEY` when set.
+- **`REF_VERIFY_MAILTO`**: Optional contact email included in the Crossref `User-Agent` header for Polite Pool routing.
 
 ```bash
 export NCBI_API_KEY="your-ncbi-api-key"
+export REF_VERIFY_MAILTO="you@example.org"
 ```
 
 ---
