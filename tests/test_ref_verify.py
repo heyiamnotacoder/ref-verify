@@ -7,12 +7,25 @@ import ast
 import io
 import json
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
 
-from ref_verify import __version__, claims, http_client, identifiers, metadata, models, quant, report, scan, verify
+from ref_verify import (
+    __version__,
+    claims,
+    http_client,
+    identifiers,
+    metadata,
+    models,
+    prefetch,
+    quant,
+    report,
+    scan,
+    verify,
+)
 from ref_verify import cli as rv
 from ref_verify.sources import fulltext, pubmed
 
@@ -1619,6 +1632,70 @@ class TestBatchPipeline(unittest.TestCase):
         crossref_single = [u for u in http.calls if "/works/" in u and fake_key in u]
         self.assertEqual(len(epmc_calls), 1, epmc_calls)
         self.assertEqual(len(crossref_single), 1, crossref_single)
+
+    def test_transient_crossref_confirm_is_not_refetched_per_citation(self) -> None:
+        fake_doi = "10.1056/NEJMoa9999999"
+        http = FakeHttpClient(
+            [
+                (
+                    "api.crossref.org/works?",
+                    models.HttpResponse(
+                        200, json.dumps({"message": {"items": [DAPA_HF_CROSSREF["message"]]}}), "cr-batch"
+                    ),
+                ),
+                ("api.crossref.org/works/", models.HttpResponse(0, "", "cr", "timed out")),
+                (
+                    "esearch.fcgi",
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"count": "0", "idlist": []}}), "es"),
+                ),
+                (
+                    "europepmc/webservices/rest/search",
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                ),
+            ]
+        )
+        cits = [models.CitationInput(doi="10.1056/NEJMoa1911303"), models.CitationInput(doi=fake_doi)]
+        results = verify.verify_citations_batch(cits, http, max_workers=4)
+
+        self.assertEqual(results[1].status, "FAIL")
+        crossref_single = [u for u in http.calls if "/works/" in u and "NEJMoa9999999" in u]
+        self.assertEqual(len(crossref_single), 1, crossref_single)
+
+    def test_concurrent_fulltext_requests_for_one_pmcid_fetch_it_once(self) -> None:
+        started, release = threading.Event(), threading.Event()
+        ft_calls: list[str] = []
+
+        class BlockingHttp(FakeHttpClient):
+            def get(self, url: str, headers: dict[str, str] | None = None, **kw: object) -> models.HttpResponse:
+                ft_calls.append(url)
+                started.set()
+                release.wait(5)
+                return models.HttpResponse(404, "", url, "HTTP 404 Not Found")
+
+        http = BlockingHttp([])
+        cache = prefetch.PrefetchCache()
+        first = threading.Thread(target=cache.store_fulltext, args=(http, ["pmc123"]))
+        first.start()
+        self.assertTrue(started.wait(5))
+        calls_before = len(ft_calls)
+        cache.store_fulltext(http, ["PMC123"])  # in flight on the other thread: must not fetch again
+        self.assertEqual(len(ft_calls), calls_before)
+        release.set()
+        first.join(5)
+        self.assertIn("PMC123", cache.fulltext_by_pmcid)
+
+
+class TestPubmedEsearch(unittest.TestCase):
+    def test_single_doi_batch_keeps_only_first_pmid_and_counts_as_checked(self) -> None:
+        body = json.dumps({"esearchresult": {"count": "3", "idlist": ["111", "222"]}})
+        http = FakeHttpClient([("esearch.fcgi", models.HttpResponse(200, body, "es"))])
+        pmids, checked = pubmed.pubmed_esearch_by_dois_batch(http, ["10.1/abc"])
+        self.assertEqual(pmids, ["111"])
+        self.assertEqual(checked, ["10.1/abc"])
+
+    def test_single_doi_batch_failure_is_unchecked(self) -> None:
+        http = FakeHttpClient([("esearch.fcgi", models.HttpResponse(0, "", "es", "timed out"))])
+        self.assertEqual(pubmed.pubmed_esearch_by_dois_batch(http, ["10.1/abc"]), ([], []))
 
 
 if __name__ == "__main__":

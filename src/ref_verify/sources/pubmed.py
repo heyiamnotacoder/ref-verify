@@ -230,6 +230,11 @@ def pubmed_esearch_by_dois_batch(http: HttpClient, dois: Sequence[str]) -> tuple
     so a failed or truncated chunk sends just its own DOIs back to per-citation esearch.
     """
     unique = list(dict.fromkeys(d for d in dois if d))
+    if len(unique) == 1:
+        # Same contract as pubmed_esearch_by_doi: first hit only, so a DOI indexed on two PubMed
+        # records resolves to one deterministic PMID; any complete answer counts as checked.
+        found = _esearch(http, f'"{unique[0]}"[DOI]', retmax=2)
+        return ([], []) if found is None else (found[0][:1], unique)
     pmids: list[str] = []
     checked: list[str] = []
     for i in range(0, len(unique), ESEARCH_DOI_CHUNK):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,6 +59,34 @@ class PrefetchCache:
     pubmed_by_doi: dict[str, PaperRecord] = field(default_factory=dict)
     esearch_checked_dois: set[str] = field(default_factory=set)
     fulltext_by_pmcid: dict[str, FulltextResult] = field(default_factory=dict)
+    _fulltext_claimed: set[str] = field(default_factory=set, repr=False)
+    _fulltext_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def store_fulltext(
+        self,
+        http: HttpClient,
+        pmcids: Sequence[str],
+        oa_flags: dict[str, bool | None] | None = None,
+        max_workers: int = 4,
+    ) -> None:
+        """Fetch OA full text for PMCIDs that no chain has fetched or started fetching yet.
+
+        Concurrent prefetch chains can discover the same PMCID; the first to claim it fetches it and the
+        others skip it (every chain finishes before the cache is read).
+        """
+        with self._fulltext_lock:
+            wanted = dict.fromkeys(p.strip().upper() for p in pmcids if p and p.strip())
+            todo = [p for p in wanted if p not in self._fulltext_claimed]
+            self._fulltext_claimed.update(todo)
+        if not todo:
+            return
+        try:
+            self.fulltext_by_pmcid.update(
+                fetch_oa_fulltext_batch(http, todo, oa_flags=oa_flags, max_workers=max_workers)
+            )
+        finally:
+            with self._fulltext_lock:
+                self._fulltext_claimed.difference_update(p for p in todo if p not in self.fulltext_by_pmcid)
 
     def store_crossref_dois(self, http: HttpClient, dois: Sequence[str], max_workers: int = 4) -> None:
         unique = list(dict.fromkeys(d for d in dois if d and d.lower() not in self.crossref_by_doi))
@@ -71,12 +100,14 @@ class PrefetchCache:
         self.crossref_by_doi.update(found)
 
     def confirm_crossref_misses(self, http: HttpClient, dois: Sequence[str], max_workers: int = 4) -> None:
-        """Re-query batch misses one by one; cache only definitive answers (200/404) so outages still retry."""
+        """Re-query batch misses one by one and cache every answer, transient failures included.
+
+        Each lookup already ran the full retry policy, so ``verify_citation`` reports a transient answer
+        as-is instead of re-fetching (the same single per-DOI lookup the unbatched path makes).
+        """
 
         def _confirm(doi: str) -> None:
-            rec, resp = fetch_crossref_doi(http, doi)
-            if rec is not None or resp.status == 404:
-                self.crossref_by_doi[doi.lower()] = (rec, resp)
+            self.crossref_by_doi[doi.lower()] = fetch_crossref_doi(http, doi)
 
         run_tasks([lambda d=d: _confirm(d) for d in dois], workers=max_workers)
 
@@ -209,8 +240,7 @@ def prefetch_batch(
             for c_doi, c_pmid, want_ft in parsed_ids
             if want_ft and c_doi and not c_pmid and (pm_r := cache.pubmed_record(c_doi, None)) and pm_r.pmcid
         ]
-        if ft_pmcids:
-            cache.fulltext_by_pmcid.update(fetch_oa_fulltext_batch(http, ft_pmcids, max_workers=fanout))
+        cache.store_fulltext(http, ft_pmcids, max_workers=fanout)
 
     def _pmid_chain() -> None:
         cache.store_pubmed_pmids(http, unique_pmids)
@@ -228,7 +258,7 @@ def prefetch_batch(
         run_tasks(
             [
                 lambda: cache.store_crossref_dois(http, discovered_dois, max_workers=fanout),
-                lambda: cache.fulltext_by_pmcid.update(fetch_oa_fulltext_batch(http, early_pmcids, max_workers=fanout)),
+                lambda: cache.store_fulltext(http, early_pmcids, max_workers=fanout),
             ],
             workers=min(workers, 2),
         )
@@ -276,7 +306,7 @@ def prefetch_batch(
     run_tasks(
         [
             _phase2c_epmc_fallback,
-            lambda: cache.fulltext_by_pmcid.update(fetch_oa_fulltext_batch(http, needed_pmcids, max_workers=fanout)),
+            lambda: cache.store_fulltext(http, needed_pmcids, max_workers=fanout),
         ],
         workers=min(workers, 2),
     )
@@ -291,13 +321,6 @@ def prefetch_batch(
         and epmc_r.pmcid.strip().upper() not in cache.fulltext_by_pmcid
     ]
     if extra_pmcids:
-        cache.fulltext_by_pmcid.update(
-            fetch_oa_fulltext_batch(
-                http,
-                extra_pmcids,
-                oa_flags=cache.oa_flags_by_pmcid(),
-                max_workers=fanout,
-            )
-        )
+        cache.store_fulltext(http, extra_pmcids, oa_flags=cache.oa_flags_by_pmcid(), max_workers=fanout)
 
     return cache
