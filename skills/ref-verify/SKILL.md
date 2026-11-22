@@ -11,12 +11,12 @@ Verify every scientific reference and quantitative claim against live primary-so
    - Whole document or slide deck (`.md`, `.txt`, `.docx`, `.pptx`): `ref-verify scan <file>`
    - Bibliography or claim list: write a JSON array (`doi`, `pmid`, `title`, `author`, `year`, `journal`, `claim`) and run `ref-verify batch <refs.json>`
    - Single citation or specific claim: `ref-verify check --doi ... --pmid ... --title ... --author ... --year ... --journal ... --claim "..."`
-   - Pass `--fulltext` when a quantitative claim cites subgroup or secondary figures absent from the abstract (fetches Europe PMC Open Access XML when a PMCID is available).
+   - Pass `--fulltext` when a quantitative claim cites subgroup or secondary figures absent from the abstract (fetches Open Access JATS XML from Europe PMC with NCBI PMC fallback when a PMCID is available).
 
 2. **Triage every diagnostic code by severity.**
    - **`CRITICAL` (`RETRACTED_PAPER`, `PMID_DOI_CONFLICT`)**: Stop and resolve immediately. Remove retracted sources from supporting evidence (or label them explicitly as retracted if discussing the retraction). For conflicts, confirm which paper is intended and replace the mismatched identifier.
    - **`ERROR` (`DOI_SYNTAX_INVALID`, `PMID_SYNTAX_INVALID`, `DOI_NOT_FOUND`, `PMID_NOT_FOUND`, `TITLE_MISMATCH`, `AUTHOR_MISMATCH`, `YEAR_MISMATCH`, `JOURNAL_MISMATCH`)**: Read the `Expected`, `Actual`, `TokenDiff`, `DID_YOU_MEAN`, and `Fix` lines; correct the broken identifier or metadata field in the source deliverable.
-   - **`WARNING` (`CLAIM_NUMBER_NOT_IN_ABSTRACT`, `ABSTRACT_UNAVAILABLE`, `EXPRESSION_OF_CONCERN`, `RETRACTION_NOTICE`, ±1-year epub offset, middle-author mismatch, subtitle truncation)**: Inspect the `Actual` field and official text, fix genuine inaccuracies, and verify derived metrics (such as relative risk reduction from a hazard ratio).
+   - **`WARNING` (`CLAIM_NUMBER_NOT_IN_ABSTRACT`, `UNLINKED_BIBLIOGRAPHY_ENTRIES`, `ABSTRACT_UNAVAILABLE`, `EXPRESSION_OF_CONCERN`, `RETRACTION_NOTICE`, ±1-year epub offset, middle-author mismatch, subtitle truncation)**: Inspect the `Actual` field and official text, fix genuine inaccuracies, resolve unlinked plain-text citations via `batch`, and verify derived metrics (such as relative risk reduction from a hazard ratio).
    - **`INFO` (`HAS_CORRECTION_NOTICE`, `FULLTEXT_UNAVAILABLE`)**: Check published errata when quoting exact figures.
 
 3. **Render a grounded verdict for every claim.**

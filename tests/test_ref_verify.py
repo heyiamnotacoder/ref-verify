@@ -354,6 +354,44 @@ class TestClaimValidityPack(unittest.TestCase):
         self.assertFalse(rv.quant_token_in_text("HR 7", "Hazard ratio was 0.74."))
         self.assertTrue(rv.quant_token_in_text("HR 0.74", "Hazard ratio was .74 in the main analysis."))
 
+    def test_percentage_does_not_match_unrelated_integers_or_identifiers(self) -> None:
+        # Regression for refs 4, 12, 15: percentages must not match "phase 3", "JAK1", "group 1", or "1-year"
+        text = (
+            "In phase 3 trials of oral JAK1 inhibitors, group 1 TCS had 1-year prevalence "
+            "ranging from 0.96% to 22.6% and rates of 0.5-1.3%."
+        )
+        self.assertFalse(rv.quant_token_in_text("3%", text))
+        self.assertFalse(rv.quant_token_in_text("1%", text))
+        self.assertTrue(rv.quant_token_in_text("0.96%", text))
+        self.assertTrue(rv.quant_token_in_text("0.5%", text))
+        # Paired percentage comparison without % on first value still matches
+        self.assertTrue(rv.quant_token_in_text("16.3%", "Primary outcome occurred in 16.3 versus 21.2% of patients."))
+        self.assertTrue(rv.quant_token_in_text("0.96%", "Prevalence ranged from 0.96 to 22.6% in children."))
+
+    def test_sentence_ending_numbers_extracted_and_matched(self) -> None:
+        # Regression for refs 19 & 21: trailing period must not drop numbers at sentence end
+        nums_easi = rv.extract_claim_numbers("EASI combines area and intensity for a score from 0 to 72.")
+        self.assertIn("0", nums_easi)
+        self.assertIn("72", nums_easi)
+        nums_cdlqi = rv.extract_claim_numbers("CDLQI is a 10-item scale scored 0 to 3 with a final score from 0 to 30.")
+        self.assertEqual(nums_cdlqi, ["10", "0", "3", "30"])
+        self.assertTrue(rv.quant_token_in_text("30", "The maximum CDLQI score is 30."))
+        self.assertFalse(rv.quant_token_in_text("16", "The mean score was 16.3."))
+
+    def test_middle_dot_decimals_normalized_for_extraction_and_matching(self) -> None:
+        # Regression for BJD/Lancet abstracts (refs 6, 20, 24) using U+00B7 middle-dot decimals
+        abstract = (
+            "The mean percentage CFB at week 4 in EASI score was significantly greater "
+            "(P < 0·001) for tofacitinib (-81·7%) vs. vehicle (-29·9%)."
+        )
+        nums = rv.extract_abstract_numbers(abstract)
+        self.assertIn("-81.7%", nums)
+        self.assertIn("-29.9%", nums)
+        self.assertTrue(any("0.001" in n for n in nums), f"Expected p-value 0.001 in {nums}")
+        self.assertNotIn("001", nums)
+        self.assertTrue(rv.quant_token_in_text("81.7%", abstract))
+        self.assertTrue(rv.quant_token_in_text("p < 0.001", abstract))
+
     def test_spelled_out_hazard_ratio_and_ci_extracted_from_abstract(self) -> None:
         abstract = "Primary outcome (hazard ratio, 0.74; 95% confidence interval [CI], 0.65 to 0.85; P<0.001)."
         nums = rv.extract_abstract_numbers(abstract)
@@ -511,6 +549,66 @@ class TestEndToEndMockedVerification(unittest.TestCase):
         self.assertEqual(res.claim_report.missing_numbers, [])
         self.assertTrue(len(res.claim_report.fulltext_excerpts) >= 1)
 
+    def test_oa_fulltext_falls_back_to_ncbi_pmc_when_europepmc_fails(self) -> None:
+        ncbi_xml = "<pmc-articleset><article><body><p>Application site burning occurred in 46.3% of treated patients during induction therapy.</p></body></article></pmc-articleset>"
+        epmc_json = {
+            "resultList": {
+                "result": [
+                    {
+                        "doi": "10.1056/NEJMoa1911303",
+                        "pmid": "31535829",
+                        "pmcid": "PMC9930707",
+                        "isOpenAccess": "Y",
+                        "title": "Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction",
+                    }
+                ]
+            }
+        }
+        http = FakeHttpClient(
+            [
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1911303",
+                    rv.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                ),
+                ("europepmc/webservices/rest/search", rv.HttpResponse(200, json.dumps(epmc_json), "epmc")),
+                ("efetch.fcgi?db=pubmed&id=31535829", rv.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("PMC9930707/fullTextXML", rv.HttpResponse(500, "", "ft-epmc", "HTTP 500 Internal Server Error")),
+                ("efetch.fcgi?db=pmc&id=PMC9930707", rv.HttpResponse(200, ncbi_xml, "ft-ncbi")),
+            ]
+        )
+        cit = rv.CitationInput(
+            doi="10.1056/NEJMoa1911303",
+            claim="Burning occurred in 46.3% of patients.",
+            fulltext=True,
+        )
+        res = rv.verify_citation(cit, http)
+        self.assertEqual(res.status, "PASS")
+        assert res.claim_report is not None
+        self.assertEqual(res.claim_report.missing_numbers, [])
+        self.assertIn("46.3% [fulltext]", res.claim_report.matched_numbers)
+        self.assertIn("NCBI PMC", res.claim_report.fulltext_status or "")
+
+    def test_oa_fulltext_surfaces_timeout_error_and_ignores_bodyless_xml(self) -> None:
+        restricted_ncbi_xml = (
+            "<pmc-articleset><article><front><article-meta><abstract>"
+            "<p>Restricted abstract mentioning 46.3% without full text body.</p>"
+            "</abstract></article-meta></front></article></pmc-articleset>"
+        )
+        http = FakeHttpClient(
+            [
+                ("PMC8074061/fullTextXML", rv.HttpResponse(0, "", "ft-epmc", "timed out")),
+                ("efetch.fcgi?db=pmc&id=PMC8074061", rv.HttpResponse(200, restricted_ncbi_xml, "ft-ncbi")),
+            ]
+        )
+        rec = rv.PaperRecord(pmcid="PMC8074061", abstract="Short abstract with no percentages.")
+        rep, diags = rv.evaluate_claim("Burning occurred in 46.3% of patients.", rec, http=http, fetch_fulltext=True)
+        self.assertEqual(rep.missing_numbers, ["46.3%"])
+        ft_diag = next(d for d in diags if d.code == "FULLTEXT_UNAVAILABLE")
+        self.assertIn("timed out", ft_diag.message)
+        self.assertNotIn("HTTP 0", ft_diag.message)
+        self.assertIn("no <body>", ft_diag.message)
+        self.assertIn("Transient", ft_diag.hint)
+
 
 class TestDocumentScanning(unittest.TestCase):
     def test_markdown_scan_pairs_colocated_doi_pmid_and_deduplicates(self) -> None:
@@ -587,6 +685,55 @@ class TestDocumentScanning(unittest.TestCase):
             self.assertEqual(cits[0].doi, "10.1056/NEJMoa1911303")
             self.assertEqual(cits[1].location, "Slide 1 notes")
             self.assertEqual(cits[1].pmid, "26378978")
+
+    def test_unlinked_bibliography_entries_detected_and_reported_by_scan(self) -> None:
+        segments = [
+            ("document:p10", "12. BIBLIOGRAPHY15"),
+            ("document:p11", "Body paragraph mentioning 2020 findings."),
+            ("document:p194", "BIBLIOGRAPHY"),
+            (
+                "document:p195",
+                "1. Ali F, Vyas J, Finlay AY. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.",
+            ),
+            ("document:p196", "2. Kramer ON et al. The history of atopic dermatitis. Clin Dermatol. 2017;35(4):344-8."),
+            ("document:p197", "3. McMurray JJV et al. Dapagliflozin. N Engl J Med. 2019. doi:10.1056/NEJMoa1911303"),
+            ("document:p198", "APPENDIX"),
+            ("document:p199", "1. Aged 2 years or older with mild to moderate atopic dermatitis."),
+        ]
+        unlinked = rv.extract_unlinked_bibliography_entries(segments)
+        self.assertEqual(len(unlinked), 2)
+        self.assertEqual([u["location"] for u in unlinked], ["document:p195", "document:p196"])
+
+        md = "\n".join(text for _, text in segments)
+        fake_http = FakeHttpClient(
+            [
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1911303",
+                    rv.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                ),
+                (
+                    "europepmc/webservices/rest/search",
+                    rv.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                ),
+                ("esearch.fcgi", rv.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "protocol.md"
+            p.write_text(md, encoding="utf-8")
+            buf = io.StringIO()
+            with mock.patch.object(rv, "HttpClient", return_value=fake_http), mock.patch("sys.stdout", buf):
+                rc = rv.main(["scan", str(p), "--json"])
+            self.assertEqual(rc, 0)
+            parsed = json.loads(buf.getvalue())
+            self.assertEqual(parsed["extracted_count"], 1)
+            self.assertEqual(parsed["unlinked_bibliography_count"], 2)
+            self.assertEqual(parsed["scan_diagnostics"][0]["code"], "UNLINKED_BIBLIOGRAPHY_ENTRIES")
+
+            buf_strict = io.StringIO()
+            with mock.patch.object(rv, "HttpClient", return_value=fake_http), mock.patch("sys.stdout", buf_strict):
+                rc_strict = rv.main(["scan", str(p), "--json", "--strict"])
+            self.assertEqual(rc_strict, 1)
 
 
 class TestBatchCLI(unittest.TestCase):

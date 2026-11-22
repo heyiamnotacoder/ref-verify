@@ -121,7 +121,7 @@ ref-verify scan review.md --json
 
 | Flag | Description |
 | --- | --- |
-| `--fulltext` | Fetch Europe PMC Open Access `fullTextXML` in addition to the abstract. |
+| `--fulltext` | Fetch Open Access full-text JATS XML (Europe PMC with NCBI PMC `efetch` fallback) in addition to the abstract. |
 | `--no-abstract` | Omit the full `OFFICIAL ABSTRACT` block from text output. |
 | `--json` | Emit structured JSON for downstream scripts or agents. |
 | `--strict` | Treat `WARNING` diagnostics as failures (exit `1`). |
@@ -146,6 +146,7 @@ ref-verify scan review.md --json
 | `ERROR` / `WARNING` | `YEAR_MISMATCH` | Year differs (`WARNING` for ±1-yr epub offset, `ERROR` for ≥2 yrs) | Official `print` and `online` publication years |
 | `ERROR` | `JOURNAL_MISMATCH` | Cited journal diverges from official full/abbreviated name | Official full title + PubMed ISO abbreviation |
 | `WARNING` | `CLAIM_NUMBER_NOT_IN_ABSTRACT` | Quantitative value in `--claim` not found in fetched abstract/OA text | Missing tokens, abstract numbers, matched sentences, and official abstract |
+| `WARNING` | `UNLINKED_BIBLIOGRAPHY_ENTRIES` | `scan` found bibliography entries under References/Bibliography with no DOI or PMID | Count, locations, previews, and hint to add DOIs/PMIDs or run `batch` |
 | `WARNING` / `INFO` | `EXPRESSION_OF_CONCERN` / `RETRACTION_NOTICE` / `HAS_CORRECTION_NOTICE` | Editorial notice or published erratum | Notice metadata so the author checks whether results changed |
 
 ---

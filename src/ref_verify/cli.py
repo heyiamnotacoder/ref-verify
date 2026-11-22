@@ -369,6 +369,8 @@ def normalize_text(text: str) -> str:
     text = text.replace("\u2010", "-").replace("\u2011", "-").replace("\u2012", "-")
     text = text.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
     text = text.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    # Normalize British/medical middle-dot decimals (e.g. "-81·7%", "P < 0·001")
+    text = re.sub(r"(?<=\d)[\u00b7\u2219](?=\d)", ".", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -1114,24 +1116,62 @@ def fetch_epmc(
     return parse_epmc_result(results[0]), resp
 
 
+def _parse_jats_body_paragraphs(xml_body: str, source_label: str) -> Tuple[List[str], Optional[str]]:
+    """Extract body paragraphs from JATS full-text XML (Europe PMC or NCBI PMC)."""
+    try:
+        root = ET.fromstring(xml_body)
+    except ET.ParseError as exc:
+        return [], f"Failed to parse {source_label} XML: {exc}"
+
+    body = root.find(".//body")
+    if body is None:
+        return [], f"{source_label} XML has no <body> element (likely not licensed for OA full-text XML)"
+
+    paragraphs: List[str] = []
+    for p in body.findall(".//p"):
+        txt = re.sub(r"\s+", " ", "".join(p.itertext())).strip()
+        if len(txt) >= 30:
+            paragraphs.append(txt)
+    if not paragraphs:
+        return [], f"{source_label} XML <body> contained no text paragraphs"
+    return paragraphs, None
+
+
+def _format_http_failure(source_label: str, resp: HttpResponse) -> str:
+    if resp.status == 0:
+        detail = resp.error or "network/timeout error"
+        return f"{source_label} request failed ({detail})"
+    return f"{source_label} returned HTTP {resp.status}"
+
+
 def fetch_epmc_fulltext_paragraphs(http: HttpClient, pmcid: str) -> Tuple[List[str], Optional[str]]:
     url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{urllib.parse.quote(pmcid)}/fullTextXML"
     resp = http.get(url)
     if resp.status != 200:
-        return [], f"Europe PMC fullTextXML returned HTTP {resp.status}"
-    try:
-        root = ET.fromstring(resp.body)
-    except ET.ParseError as exc:
-        return [], f"Failed to parse fullTextXML: {exc}"
+        return [], _format_http_failure("Europe PMC fullTextXML", resp)
+    return _parse_jats_body_paragraphs(resp.body, "Europe PMC fullTextXML")
 
-    paragraphs: List[str] = []
-    body = root.find(".//body")
-    target = body if body is not None else root
-    for p in target.findall(".//p"):
-        txt = re.sub(r"\s+", " ", "".join(p.itertext())).strip()
-        if len(txt) >= 30:
-            paragraphs.append(txt)
-    return paragraphs, None
+
+def fetch_ncbi_pmc_fulltext_paragraphs(http: HttpClient, pmcid: str) -> Tuple[List[str], Optional[str]]:
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={urllib.parse.quote(pmcid)}&retmode=xml"
+    resp = http.get(url)
+    if resp.status != 200:
+        return [], _format_http_failure("NCBI PMC efetch", resp)
+    return _parse_jats_body_paragraphs(resp.body, "NCBI PMC efetch")
+
+
+def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str) -> Tuple[List[str], Optional[str], Optional[str]]:
+    """Fetch OA JATS full-text paragraphs from Europe PMC, falling back to NCBI PMC on failure."""
+    paragraphs, epmc_err = fetch_epmc_fulltext_paragraphs(http, pmcid)
+    if paragraphs:
+        return paragraphs, "Europe PMC", None
+
+    ncbi_paragraphs, ncbi_err = fetch_ncbi_pmc_fulltext_paragraphs(http, pmcid)
+    if ncbi_paragraphs:
+        return ncbi_paragraphs, "NCBI PMC", None
+
+    errors = [e for e in (epmc_err, ncbi_err) if e]
+    return [], None, "; ".join(errors) if errors else "empty body"
 
 
 def merge_records(records: Sequence[Optional[PaperRecord]]) -> Optional[PaperRecord]:
@@ -1629,7 +1669,9 @@ QUANT_PATTERNS = [
 ]
 
 BARE_NUMBER_RE = re.compile(
-    r"(?<![A-Za-z0-9.])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z0-9.])|(?<![A-Za-z0-9.])\d+\.\d+(?![A-Za-z0-9.])|(?<![A-Za-z0-9.])\d+(?![A-Za-z0-9.])"
+    r"(?<![A-Za-z0-9.])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z0-9])(?!\.\d)"
+    r"|(?<![A-Za-z0-9.])\d+\.\d+(?![A-Za-z0-9])(?!\.\d)"
+    r"|(?<![A-Za-z0-9.])\d+(?![A-Za-z0-9])(?!\.\d)"
 )
 
 
@@ -1708,15 +1750,21 @@ def _number_present_in_text(num_str: str, norm_text_no_commas: str, is_percent: 
         alts.append(re.escape(val.rstrip("0").rstrip(".")))
 
     num_group = "(?:" + "|".join(alts) + ")"
+    left_bound = r"(?<![A-Za-z0-9.])(?<![A-Za-z]-)"
+    right_bound = r"(?![A-Za-z0-9])(?!\.\d)"
     if is_percent:
-        pat = rf"(?<![\d.]){num_group}(?:\s*(?:%|percent|per\s+cent))(?![A-Za-z])"
+        pat = rf"{left_bound}{num_group}(?:\s*(?:%|percent|per\s+cent))(?![A-Za-z])"
         if re.search(pat, norm_text_no_commas, flags=re.IGNORECASE):
             return True
-        # Also allow matching the bare number in tables/prose like "16.3 versus 21.2%"
-        pat_bare = rf"(?<![\d.]){num_group}(?![\d.])"
-        return bool(re.search(pat_bare, norm_text_no_commas))
+        # Also allow bare numbers paired in a percentage range/comparison (e.g. "16.3 versus 21.2%", "0.96 to 22.6%")
+        pat_paired = (
+            rf"{left_bound}{num_group}{right_bound}"
+            r"\s*(?:-|to|vs\.?|versus|and|or|,|/)\s*"
+            r"-?\d+(?:\.\d+)?\s*(?:%|percent|per\s+cent)(?![A-Za-z])"
+        )
+        return bool(re.search(pat_paired, norm_text_no_commas, flags=re.IGNORECASE))
 
-    pat = rf"(?<![\d.]){num_group}(?![\d.])"
+    pat = rf"{left_bound}{num_group}{right_bound}"
     return bool(re.search(pat, norm_text_no_commas))
 
 
@@ -1857,22 +1905,30 @@ def evaluate_claim(
                 )
             )
         else:
-            paragraphs, err = fetch_epmc_fulltext_paragraphs(http, rec.pmcid)
+            paragraphs, ft_source, err = fetch_oa_fulltext_paragraphs(http, rec.pmcid)
             if err or not paragraphs:
-                report.fulltext_status = f"unavailable: {err or 'no body paragraphs'}"
+                err_text = err or "empty body"
+                report.fulltext_status = f"unavailable: {err_text}"
+                is_transient = bool(re.search(r"request failed|HTTP 5\d\d|HTTP 429|timed? ?out", err_text, re.I))
+                hint = (
+                    "Transient network timeout or upstream 5xx error fetching OA full text — retry or increase --timeout."
+                    if is_transient
+                    else "Article may be embargoed or not licensed for OA full-text XML distribution."
+                )
                 diags.append(
                     Diagnostic(
                         code="FULLTEXT_UNAVAILABLE",
                         severity="INFO",
-                        message=f"Europe PMC fullTextXML unavailable for {rec.pmcid}: {err or 'empty body'}.",
+                        message=f"OA full-text XML unavailable for {rec.pmcid}: {err_text}.",
                         expected=f"Open Access fullTextXML for {rec.pmcid}",
-                        actual=err or "empty body",
-                        hint="Article may be embargoed or not licensed for OA full-text XML distribution.",
-                        fix="Verify non-abstract numbers against the publisher PDF.",
+                        actual=err_text,
+                        hint=hint,
+                        fix="Verify non-abstract numbers against the publisher PDF (or re-run with a larger --timeout if transient).",
                     )
                 )
             else:
-                report.fulltext_status = f"fetched ({len(paragraphs)} paragraphs from {rec.pmcid})"
+                src_tag = f" via {ft_source}" if ft_source else ""
+                report.fulltext_status = f"fetched ({len(paragraphs)} paragraphs from {rec.pmcid}{src_tag})"
                 full_joined = "\n".join(paragraphs)
                 # Re-check any numbers missing from abstract against OA full text
                 still_missing: List[str] = []
@@ -2412,6 +2468,83 @@ def extract_citations_from_segments(segments: Sequence[Tuple[str, str]]) -> List
     return extracted
 
 
+BIBLIOGRAPHY_HEADING_RE = re.compile(
+    r"^(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*\.?\s+)?(?:references|bibliography|works\s+cited|literature\s+cited)\s*:?$",
+    flags=re.IGNORECASE,
+)
+POST_BIBLIOGRAPHY_HEADING_RE = re.compile(
+    r"^(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*\.?\s+)?"
+    r"(?:appendix|appendices|supplementary|supplemental|tables?|figures?|"
+    r"acknowledg(?:e)?ments?|funding|conflicts?\s+of\s+interest|competing\s+interests?|"
+    r"author\s+contributions?|abbreviations?|glossary|annexure|case\s+record\s+form)\b",
+    flags=re.IGNORECASE,
+)
+NUMBERED_ENTRY_RE = re.compile(r"^(?:\[\d+\]|\d+[.)])\s*\S")
+YEAR_OR_URL_RE = re.compile(r"(?:\b(?:19|20)\d{2}\b|https?://)", flags=re.IGNORECASE)
+
+
+def _is_bibliography_section_end(line: str) -> bool:
+    if BIBLIOGRAPHY_HEADING_RE.match(line):
+        return False
+    if line.startswith("#"):
+        return True
+    if len(line) <= 60 and not YEAR_OR_URL_RE.search(line):
+        if POST_BIBLIOGRAPHY_HEADING_RE.match(line):
+            return True
+        letters = [ch for ch in line if ch.isalpha()]
+        if len(letters) >= 3 and all(ch.isupper() for ch in letters) and not re.search(r"\d", line):
+            return True
+    return False
+
+
+def extract_unlinked_bibliography_entries(segments: Sequence[Tuple[str, str]]) -> List[Dict[str, str]]:
+    """Find bibliography entries under a References/Bibliography heading that contain no DOI or PMID."""
+    unlinked: List[Dict[str, str]] = []
+    in_bib = False
+
+    for loc, text in segments:
+        stripped = text.strip()
+        if not stripped:
+            continue
+        if BIBLIOGRAPHY_HEADING_RE.match(stripped):
+            in_bib = True
+            continue
+        if not in_bib:
+            continue
+        if _is_bibliography_section_end(stripped):
+            in_bib = False
+            continue
+        if SCAN_DOI_RE.search(stripped) or SCAN_PMID_RE.search(stripped):
+            continue
+        looks_like_entry = (NUMBERED_ENTRY_RE.match(stripped) and len(stripped) >= 15) or (
+            YEAR_OR_URL_RE.search(stripped) and len(stripped) >= 20
+        )
+        if looks_like_entry:
+            unlinked.append({"location": loc, "text": stripped})
+
+    return unlinked
+
+
+def build_unlinked_bibliography_diagnostic(entries: Sequence[Dict[str, str]]) -> Optional[Diagnostic]:
+    if not entries:
+        return None
+    count = len(entries)
+    previews = [f"{e['location']}: {_truncate(e['text'], 110)}" for e in entries[:5]]
+    return Diagnostic(
+        code="UNLINKED_BIBLIOGRAPHY_ENTRIES",
+        severity="WARNING",
+        message=(
+            f"Found {count} bibliography entr{'y' if count == 1 else 'ies'} without a DOI or PMID; "
+            f"`ref-verify scan` could not verify {'it' if count == 1 else 'them'} automatically."
+        ),
+        expected="Every journal reference includes a DOI or PMID (or is verified via `ref-verify batch`)",
+        actual=f"{count} unlinked bibliography entries (first {len(previews)}: {previews})",
+        details={"count": count, "locations": [e["location"] for e in entries]},
+        hint="Plain-text citations (e.g. Vancouver references without DOIs/PMIDs) are invisible to identifier-only scanning.",
+        fix="Add DOIs/PMIDs to bibliography entries or export them to JSON and run `ref-verify batch <refs.json>`.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Formatting: Structured Agent-Readable Report + JSON
 # ---------------------------------------------------------------------------
@@ -2687,12 +2820,32 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 2
 
     citations = extract_citations_from_segments(segments)
+    unlinked_entries = extract_unlinked_bibliography_entries(segments)
+    scan_diag = build_unlinked_bibliography_diagnostic(unlinked_entries)
+    scan_diagnostics: List[Diagnostic] = [scan_diag] if scan_diag else []
+
     if not citations:
         if args.json:
-            print(json.dumps({"file": str(path), "extracted_count": 0, "results": []}, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "file": str(path),
+                        "extracted_count": 0,
+                        "unlinked_bibliography_count": len(unlinked_entries),
+                        "unlinked_bibliography_entries": unlinked_entries,
+                        "scan_diagnostics": [asdict(d) for d in scan_diagnostics],
+                        "results": [],
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             print(f"SCAN: No DOIs or PMIDs found in '{path}'.")
-        return 0
+            if scan_diag:
+                print(f"[*] [{scan_diag.severity}] {scan_diag.code}: {scan_diag.message}")
+                print(f"    Fix: {scan_diag.fix}")
+        return 1 if (args.strict and scan_diagnostics) else 0
 
     http = HttpClient(timeout=args.timeout)
     results: List[VerificationResult] = []
@@ -2704,6 +2857,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         out = {
             "file": str(path),
             "extracted_count": len(citations),
+            "unlinked_bibliography_count": len(unlinked_entries),
+            "unlinked_bibliography_entries": unlinked_entries,
+            "scan_diagnostics": [asdict(d) for d in scan_diagnostics],
             "summary": {
                 "total": len(results),
                 "pass": sum(1 for r in results if r.status == "PASS"),
@@ -2718,11 +2874,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
         # Print broken/critical/warning items first, then clean items, or preserve document order + summary
         for i, res in enumerate(results, start=1):
             print(format_result_text(res, index=i, show_abstract=not args.no_abstract))
+        if scan_diag:
+            print("-" * 78)
+            print(f"[*] [{scan_diag.severity}] {scan_diag.code}: {scan_diag.message}")
+            for entry in unlinked_entries[:10]:
+                print(f"    - {entry['location']}: {_truncate(entry['text'], 110)}")
+            if len(unlinked_entries) > 10:
+                print(f"    ... and {len(unlinked_entries) - 10} more")
+            print(f"    Fix: {scan_diag.fix}")
         print(format_summary_text(results, header="SCAN SUMMARY"))
 
     if any(r.status == "FAIL" for r in results):
         return 1
-    if args.strict and any(r.status == "WARN" for r in results):
+    if args.strict and (any(r.status == "WARN" for r in results) or scan_diagnostics):
         return 1
     return 0
 
