@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
-
 from ref_verify.cohort import check_claim_cohort
 from ref_verify.http_client import HttpClient
 from ref_verify.models import ClaimReport, Diagnostic, FulltextResult, PaperRecord
@@ -23,18 +21,18 @@ from ref_verify.text import normalize_text
 def evaluate_claim(
     claim: str,
     rec: PaperRecord,
-    http: Optional[HttpClient] = None,
+    http: HttpClient | None = None,
     fetch_fulltext: bool = False,
-    prefetched_fulltext: Optional[FulltextResult] = None,
-) -> Tuple[ClaimReport, List[Diagnostic]]:
+    prefetched_fulltext: FulltextResult | None = None,
+) -> tuple[ClaimReport, list[Diagnostic]]:
     report = ClaimReport(
         claim=claim,
         extracted_numbers=extract_claim_numbers(claim),
         extracted_keywords=extract_claim_keywords(claim),
         abstract_available=bool(rec.abstract),
     )
-    diags: List[Diagnostic] = []
-    ft_paragraphs: List[str] = []
+    diags: list[Diagnostic] = []
+    ft_paragraphs: list[str] = []
 
     if not rec.abstract:
         diags.append(
@@ -111,7 +109,7 @@ def evaluate_claim(
                 report.fulltext_status = f"fetched ({len(ft_res.paragraphs)} paragraphs from {rec.pmcid}{src_tag})"
                 if report.missing_numbers:
                     full_low, full_no_commas = normalize_for_quant("\n".join(ft_res.paragraphs))
-                    still_missing: List[str] = []
+                    still_missing: list[str] = []
                     for tok in report.missing_numbers:
                         if quant_token_in_norm_text(tok, full_low, full_no_commas):
                             report.matched_numbers.append(f"{tok} [fulltext]")

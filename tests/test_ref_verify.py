@@ -9,7 +9,6 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
 from unittest import mock
 
 from ref_verify import __version__, claims, http_client, identifiers, metadata, models, quant, report, scan, verify
@@ -185,12 +184,19 @@ DAPA_HF_SUBGROUP_PUBMED_XML = """<?xml version="1.0" encoding="UTF-8"?>
 class FakeHttpClient(http_client.HttpClient):
     """Deterministic HTTP mock keyed by substring rules."""
 
-    def __init__(self, routes: List[tuple[str, http_client.HttpResponse]]) -> None:
+    def __init__(self, routes: list[tuple[str, http_client.HttpResponse]]) -> None:
         super().__init__(timeout=5.0, retries=0)
         self.routes = routes
-        self.calls: List[str] = []
+        self.calls: list[str] = []
 
-    def get(self, url: str, headers: Optional[Dict[str, str]] = None) -> http_client.HttpResponse:
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
+        retries: int | None = None,
+    ) -> http_client.HttpResponse:
         self.calls.append(url)
         for pattern, resp in self.routes:
             if pattern in url:
@@ -206,7 +212,7 @@ class FakeHttpClient(http_client.HttpClient):
 class TestPackageMetadata(unittest.TestCase):
     def test_package_version_matches_cli(self) -> None:
         self.assertEqual(__version__, "0.1.0")
-        self.assertEqual(__version__, __version__)
+        self.assertEqual(rv.__version__, __version__)
 
     def test_cli_version_flag(self) -> None:
         buf = io.StringIO()
@@ -1446,9 +1452,9 @@ class TestBatchCLI(unittest.TestCase):
                 )
             ]
         )
-        ids, ok = pubmed.pubmed_esearch_by_dois_batch(http, ["10.1056/NEJMoa1911303", "10.1056/NEJMoa1504720"])
+        ids, checked = pubmed.pubmed_esearch_by_dois_batch(http, ["10.1056/NEJMoa1911303", "10.1056/NEJMoa1504720"])
         self.assertEqual(ids, ["31535829", "26378978"])
-        self.assertFalse(ok)
+        self.assertEqual(checked, [])  # truncated chunk: its DOIs must fall back individually
 
     def test_fulltext_discovers_epmc_only_pmcid_when_pubmed_lacks_pmcid(self) -> None:
         # DAPA_HF_PUBMED_XML has no PMCID; Europe PMC provides PMC7654321
@@ -1499,7 +1505,7 @@ class TestBatchCLI(unittest.TestCase):
         import ssl
 
         client = http_client.HttpClient(timeout=5.0, retries=0)
-        borrow_calls: List[bool] = []
+        borrow_calls: list[bool] = []
 
         class _BadConn:
             def __init__(self, exc: Exception) -> None:
@@ -1518,7 +1524,7 @@ class TestBatchCLI(unittest.TestCase):
             will_close = True
 
             class _Headers:
-                def get(self, k: str, default: Optional[str] = None) -> Optional[str]:
+                def get(self, k: str, default: str | None = None) -> str | None:
                     return default
 
                 def get_content_charset(self) -> str:
@@ -1557,10 +1563,10 @@ class TestBatchCLI(unittest.TestCase):
 
     def test_http_client_get_fallback_policy(self) -> None:
         client = http_client.HttpClient(timeout=12.0, retries=2)
-        seen: List[tuple[float, int]] = []
+        seen: list[tuple[float, int]] = []
 
         def fake_impl(
-            url: str, headers: Optional[Dict[str, str]], timeout: float, retries: int
+            url: str, headers: dict[str, str] | None, timeout: float, retries: int
         ) -> http_client.HttpResponse:
             seen.append((timeout, retries))
             return http_client.HttpResponse(200, "{}", url)
@@ -1569,6 +1575,39 @@ class TestBatchCLI(unittest.TestCase):
             client.get_fallback("https://example.org/a", primary_failed_transient=False)
             client.get_fallback("https://example.org/b", primary_failed_transient=True)
         self.assertEqual(seen, [(client.FALLBACK_TIMEOUT, 0), (12.0, 2)])
+
+
+class TestBatchPipeline(unittest.TestCase):
+    def test_crossref_miss_is_confirmed_and_sent_to_europe_pmc_exactly_once(self) -> None:
+        fake_doi = "10.1056/NEJMoa9999999"
+        http = FakeHttpClient(
+            [
+                (
+                    "api.crossref.org/works?",
+                    http_client.HttpResponse(
+                        200, json.dumps({"message": {"items": [DAPA_HF_CROSSREF["message"]]}}), "cr-batch"
+                    ),
+                ),
+                (
+                    "esearch.fcgi",
+                    http_client.HttpResponse(200, json.dumps({"esearchresult": {"count": "0", "idlist": []}}), "es"),
+                ),
+                (
+                    "europepmc/webservices/rest/search",
+                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                ),
+            ]
+        )
+        cits = [models.CitationInput(doi="10.1056/NEJMoa1911303"), models.CitationInput(doi=fake_doi)]
+        results = verify.verify_citations_batch(cits, http, max_workers=4)
+
+        self.assertEqual(results[0].status, "PASS")
+        self.assertIn("DOI_NOT_FOUND", [d.code for d in results[1].diagnostics])
+        fake_key = "NEJMoa9999999"
+        epmc_calls = [u for u in http.calls if "europepmc" in u and fake_key in u]
+        crossref_single = [u for u in http.calls if "/works/" in u and fake_key in u]
+        self.assertEqual(len(epmc_calls), 1, epmc_calls)
+        self.assertEqual(len(crossref_single), 1, crossref_single)
 
 
 if __name__ == "__main__":

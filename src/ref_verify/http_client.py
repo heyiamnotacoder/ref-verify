@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ref_verify import __version__
 
@@ -34,7 +34,7 @@ class HttpResponse:
     status: int
     body: str
     url: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 def _decompress_body(raw: bytes, content_encoding: str) -> bytes:
@@ -55,7 +55,7 @@ def _decompress_body(raw: bytes, content_encoding: str) -> bytes:
     return raw
 
 
-def is_transient_http(resp: Optional[HttpResponse]) -> bool:
+def is_transient_http(resp: HttpResponse | None) -> bool:
     return resp is not None and (resp.status == 0 or resp.status in (429, 500, 502, 503, 504))
 
 
@@ -69,14 +69,14 @@ class HttpClient:
         self._ncbi_lock = threading.Lock()
         self._next_ncbi_slot = 0.0
         self._pool_lock = threading.Lock()
-        self._pools: Dict[Tuple[str, str, int], List[http.client.HTTPConnection]] = {}
-        self._ssl_ctx: Optional[ssl.SSLContext] = None
+        self._pools: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+        self._ssl_ctx: ssl.SSLContext | None = None
         self._cache_lock = threading.Lock()
-        self._cache: Dict[Tuple[str, str], HttpResponse] = {}
-        self._inflight: Dict[Tuple[str, str], threading.Event] = {}
+        self._cache: dict[tuple[str, str], HttpResponse] = {}
+        self._inflight: dict[tuple[str, str], threading.Event] = {}
         self._has_proxies = bool(urllib.request.getproxies())
 
-    def __enter__(self) -> "HttpClient":
+    def __enter__(self) -> HttpClient:
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -100,7 +100,7 @@ class HttpClient:
 
     def _borrow_conn(
         self, scheme: str, host: str, port: int, timeout: float, force_fresh: bool = False
-    ) -> Tuple[http.client.HTTPConnection, bool]:
+    ) -> tuple[http.client.HTTPConnection, bool]:
         key = (scheme, host, port)
         if not force_fresh:
             with self._pool_lock:
@@ -128,7 +128,7 @@ class HttpClient:
             pass
 
     def _pace_ncbi(self) -> None:
-        min_gap = 0.11 if self.ncbi_api_key else 0.34
+        min_gap = 0.11 if self.ncbi_api_key else 0.36  # NCBI: 10/s with key, 3/s without (+margin)
         with self._ncbi_lock:
             now = time.monotonic()
             slot = max(now, self._next_ncbi_slot)
@@ -138,8 +138,8 @@ class HttpClient:
             time.sleep(wait_s)
 
     def _single_request_pooled(
-        self, url: str, req_headers: Dict[str, str], timeout: float
-    ) -> Tuple[int, str, str, Optional[str], Optional[str]]:
+        self, url: str, req_headers: dict[str, str], timeout: float
+    ) -> tuple[int, str, str, str | None, str | None]:
         """Perform one GET with Keep-Alive connection reuse & redirect handling.
 
         Returns (status, body, final_url, reason, retry_after).
@@ -210,8 +210,8 @@ class HttpClient:
         return 0, "", cur_url, "Too many redirects", None
 
     def _single_request_urllib(
-        self, url: str, req_headers: Dict[str, str], timeout: float
-    ) -> Tuple[int, str, str, Optional[str], Optional[str]]:
+        self, url: str, req_headers: dict[str, str], timeout: float
+    ) -> tuple[int, str, str, str | None, str | None]:
         req = urllib.request.Request(url, headers=req_headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -232,7 +232,7 @@ class HttpClient:
     def get_fallback(
         self,
         url: str,
-        headers: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
         *,
         primary_failed_transient: bool = False,
     ) -> HttpResponse:
@@ -240,21 +240,31 @@ class HttpClient:
 
         Uses full timeout/retries when the primary source suffered a transient outage (status 0/429/5xx),
         and bounded timeout with zero retries for best-effort enrichment/fallback otherwise.
-        Delegates to get() for subclasses/test mocks.
         """
-        if type(self) is not HttpClient:
-            return self.get(url, headers=headers)
         if primary_failed_transient:
-            return self._get_impl(url, headers=headers, timeout=self.timeout, retries=self.retries)
-        return self._get_impl(url, headers=headers, timeout=min(self.timeout, self.FALLBACK_TIMEOUT), retries=0)
+            return self.get(url, headers)
+        return self.get(url, headers, timeout=min(self.timeout, self.FALLBACK_TIMEOUT), retries=0)
 
-    def get(self, url: str, headers: Optional[Dict[str, str]] = None) -> HttpResponse:
-        return self._get_impl(url, headers=headers, timeout=self.timeout, retries=self.retries)
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
+        retries: int | None = None,
+    ) -> HttpResponse:
+        """The single overridable request seam; ``None`` means the client's defaults."""
+        return self._get_impl(
+            url,
+            headers=headers,
+            timeout=self.timeout if timeout is None else timeout,
+            retries=self.retries if retries is None else retries,
+        )
 
     def _get_impl(
         self,
         url: str,
-        headers: Optional[Dict[str, str]],
+        headers: dict[str, str] | None,
         timeout: float,
         retries: int,
     ) -> HttpResponse:
@@ -285,7 +295,7 @@ class HttpClient:
                     break
             inflight_evt.wait()
 
-        result: Optional[HttpResponse] = None
+        result: HttpResponse | None = None
         try:
             if is_ncbi:
                 self._pace_ncbi()

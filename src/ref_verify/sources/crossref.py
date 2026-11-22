@@ -6,7 +6,8 @@ import concurrent.futures
 import json
 import re
 import urllib.parse
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 from ref_verify.http_client import HttpClient, HttpResponse
 from ref_verify.models import Author, PaperRecord
@@ -22,7 +23,7 @@ CROSSREF_SELECT_FIELDS = (
 CROSSREF_BATCH_SIZE = 25
 
 
-def _extract_crossref_year(item: Dict[str, Any], key: str) -> Optional[int]:
+def _extract_crossref_year(item: dict[str, Any], key: str) -> int | None:
     part = item.get(key)
     if isinstance(part, dict):
         dp = part.get("date-parts")
@@ -34,7 +35,7 @@ def _extract_crossref_year(item: Dict[str, Any], key: str) -> Optional[int]:
     return None
 
 
-def parse_crossref_work(msg: Dict[str, Any]) -> PaperRecord:
+def parse_crossref_work(msg: dict[str, Any]) -> PaperRecord:
     rec = PaperRecord(sources=["crossref"])
     doi = msg.get("DOI")
     if doi:
@@ -128,7 +129,7 @@ def parse_crossref_work(msg: Dict[str, Any]) -> PaperRecord:
     return rec
 
 
-def fetch_crossref_doi(http: HttpClient, doi: str) -> Tuple[Optional[PaperRecord], HttpResponse]:
+def fetch_crossref_doi(http: HttpClient, doi: str) -> tuple[PaperRecord | None, HttpResponse]:
     quoted = urllib.parse.quote(doi, safe="/")
     url = f"https://api.crossref.org/works/{quoted}"
     resp = http.get(url, headers={"Accept": "application/json"})
@@ -147,13 +148,13 @@ def fetch_crossref_doi(http: HttpClient, doi: str) -> Tuple[Optional[PaperRecord
 
 def fetch_crossref_dois_batch(
     http: HttpClient, dois: Sequence[str], max_workers: int = 4
-) -> Tuple[Dict[str, Tuple[PaperRecord, HttpResponse]], bool]:
+) -> tuple[dict[str, tuple[PaperRecord, HttpResponse]], bool]:
     """Batch-fetch Crossref works via filter=doi:...&select=... in chunks.
 
     Returns (doi_lower -> (PaperRecord, HttpResponse), all_chunks_ok).
     DOIs containing commas (Crossref filter delimiter) are skipped for single-DOI fallback.
     """
-    unique: List[str] = []
+    unique: list[str] = []
     seen: set[str] = set()
     for d in dois:
         low = d.lower()
@@ -167,7 +168,7 @@ def fetch_crossref_dois_batch(
 
     chunks = [unique[i : i + CROSSREF_BATCH_SIZE] for i in range(0, len(unique), CROSSREF_BATCH_SIZE)]
 
-    def _fetch_chunk(chunk: List[str]) -> Tuple[Dict[str, Tuple[PaperRecord, HttpResponse]], bool]:
+    def _fetch_chunk(chunk: list[str]) -> tuple[dict[str, tuple[PaperRecord, HttpResponse]], bool]:
         filt = ",".join(f"doi:{d}" for d in chunk)
         params = {
             "filter": filt,
@@ -182,7 +183,7 @@ def fetch_crossref_dois_batch(
             items = json.loads(resp.body).get("message", {}).get("items", [])
         except json.JSONDecodeError:
             return {}, False
-        out: Dict[str, Tuple[PaperRecord, HttpResponse]] = {}
+        out: dict[str, tuple[PaperRecord, HttpResponse]] = {}
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -191,7 +192,7 @@ def fetch_crossref_dois_batch(
                 out[rec.doi.lower()] = (rec, resp)
         return out, True
 
-    found: Dict[str, Tuple[PaperRecord, HttpResponse]] = {}
+    found: dict[str, tuple[PaperRecord, HttpResponse]] = {}
     all_ok = True
     if len(chunks) == 1:
         chunk_found, ok = _fetch_chunk(chunks[0])
@@ -207,8 +208,8 @@ def fetch_crossref_dois_batch(
 
 
 def search_crossref_by_title(
-    http: HttpClient, title: str, author: Optional[str] = None, rows: int = 8
-) -> List[Dict[str, Any]]:
+    http: HttpClient, title: str, author: str | None = None, rows: int = 8
+) -> list[dict[str, Any]]:
     params = {"query.title": title, "rows": str(rows), "select": CROSSREF_SELECT_FIELDS}
     if author:
         params["query.author"] = author
@@ -221,7 +222,7 @@ def search_crossref_by_title(
     except json.JSONDecodeError:
         return []
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue

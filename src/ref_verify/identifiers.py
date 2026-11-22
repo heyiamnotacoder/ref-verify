@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
 
-from ref_verify.models import Diagnostic
+from ref_verify.models import CitationInput, Diagnostic
 
 DOI_CORE_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 
@@ -13,7 +12,7 @@ DOI_CORE_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 TRAILING_PUNCT_CHARS = ".,;:'\"<>?!"
 
 
-def strip_unbalanced_closing(s: str) -> Tuple[str, str]:
+def strip_unbalanced_closing(s: str) -> tuple[str, str]:
     """Strip trailing unbalanced ), ], } and punctuation characters."""
     removed = []
     cur = s
@@ -35,7 +34,7 @@ def strip_unbalanced_closing(s: str) -> Tuple[str, str]:
     return cur, "".join(reversed(removed))
 
 
-def validate_doi(raw_doi: str) -> Tuple[Optional[str], Optional[Diagnostic]]:
+def validate_doi(raw_doi: str) -> tuple[str | None, Diagnostic | None]:
     """Validate DOI syntax. Returns (canonical_doi_or_cleaned, optional_diagnostic)."""
     original = raw_doi
     s = original.strip()
@@ -53,7 +52,7 @@ def validate_doi(raw_doi: str) -> Tuple[Optional[str], Optional[Diagnostic]]:
     # Strip standard URL / label prefixes cleanly (accepted convention)
     s = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)", "", s, flags=re.IGNORECASE).strip()
 
-    issues: List[str] = []
+    issues: list[str] = []
     candidate = s
 
     # URL query/fragment junk (e.g. ?via%3Dihub or #sec1)
@@ -120,7 +119,7 @@ def validate_doi(raw_doi: str) -> Tuple[Optional[str], Optional[Diagnostic]]:
     return candidate, None
 
 
-def validate_pmid(raw_pmid: str) -> Tuple[Optional[str], Optional[Diagnostic]]:
+def validate_pmid(raw_pmid: str) -> tuple[str | None, Diagnostic | None]:
     """Validate PMID syntax. Returns (digits_or_cleaned, optional_diagnostic)."""
     original = str(raw_pmid)
     s = original.strip()
@@ -167,3 +166,19 @@ def validate_pmid(raw_pmid: str) -> Tuple[Optional[str], Optional[Diagnostic]]:
         ),
     )
     return cleaned, diag
+
+
+def clean_identifiers(cit: CitationInput) -> tuple[str | None, str | None, list[Diagnostic]]:
+    """Syntax-clean a citation's DOI and PMID, returning (doi, pmid, syntax diagnostics)."""
+    diagnostics: list[Diagnostic] = []
+    doi: str | None = None
+    pmid: str | None = None
+    if cit.doi:
+        doi, doi_diag = validate_doi(cit.doi)
+        if doi_diag is not None:
+            diagnostics.append(doi_diag)
+    if cit.pmid:
+        pmid, pmid_diag = validate_pmid(cit.pmid)
+        if pmid_diag is not None:
+            diagnostics.append(pmid_diag)
+    return doi, pmid, diagnostics

@@ -6,12 +6,12 @@ import difflib
 import html
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ref_verify.lexicons import JOURNAL_ALIASES
 
 
-def strip_tags(text: Optional[str]) -> str:
+def strip_tags(text: str | None) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"<[^>]+>", " ", text)
@@ -21,6 +21,8 @@ def strip_tags(text: Optional[str]) -> str:
 
 
 def strip_accents(text: str) -> str:
+    if text.isascii():  # NFKD leaves ASCII unchanged; skip the per-character scan
+        return text
     nfkd = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
@@ -36,7 +38,7 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def tokenize_words(text: str) -> List[str]:
+def tokenize_words(text: str) -> list[str]:
     norm = normalize_text(text).lower()
     return re.findall(r"[a-z0-9]+", norm)
 
@@ -51,16 +53,16 @@ def normalize_journal(name: str) -> str:
     return norm
 
 
-_JOURNAL_ALIAS_LOOKUP: Dict[str, str] = {
+_JOURNAL_ALIAS_LOOKUP: dict[str, str] = {
     normalize_journal(v): key for key, variants in JOURNAL_ALIASES.items() for v in variants
 }
 
 
-def journal_alias_group(name: str) -> Optional[str]:
+def journal_alias_group(name: str) -> str | None:
     return _JOURNAL_ALIAS_LOOKUP.get(normalize_journal(name))
 
 
-def parse_year_int(val: Any) -> Optional[int]:
+def parse_year_int(val: Any) -> int | None:
     if val is None:
         return None
     m = re.search(r"\b(1[5-9]\d{2}|20\d{2}|21\d{2})\b", str(val))

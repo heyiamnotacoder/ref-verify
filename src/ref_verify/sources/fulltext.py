@@ -6,7 +6,7 @@ import concurrent.futures
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from ref_verify.http_client import HttpClient, HttpResponse, is_transient_http
 from ref_verify.models import FulltextResult
@@ -14,12 +14,12 @@ from ref_verify.models import FulltextResult
 PMC_FULLTEXT_BATCH_SIZE = 12
 
 
-def extract_paragraphs_from_article_node(node: ET.Element, source_label: str) -> Tuple[List[str], Optional[str], bool]:
+def extract_paragraphs_from_article_node(node: ET.Element, source_label: str) -> tuple[list[str], str | None, bool]:
     body = node.find(".//body")
     if body is None:
         return [], f"{source_label} XML has no <body> element (likely not licensed for OA full-text XML)", True
 
-    paragraphs: List[str] = []
+    paragraphs: list[str] = []
     for p in body.findall(".//p"):
         txt = re.sub(r"\s+", " ", "".join(p.itertext())).strip()
         if len(txt) >= 30:
@@ -29,7 +29,7 @@ def extract_paragraphs_from_article_node(node: ET.Element, source_label: str) ->
     return paragraphs, None, False
 
 
-def _parse_jats_body_paragraphs(xml_body: str, source_label: str) -> Tuple[List[str], Optional[str], bool]:
+def _parse_jats_body_paragraphs(xml_body: str, source_label: str) -> tuple[list[str], str | None, bool]:
     """Extract body paragraphs from JATS full-text XML (Europe PMC or NCBI PMC)."""
     try:
         root = ET.fromstring(xml_body)
@@ -38,7 +38,7 @@ def _parse_jats_body_paragraphs(xml_body: str, source_label: str) -> Tuple[List[
     return extract_paragraphs_from_article_node(root, source_label)
 
 
-def parse_pmc_xml_many(xml_body: str) -> Dict[str, FulltextResult]:
+def parse_pmc_xml_many(xml_body: str) -> dict[str, FulltextResult]:
     """Parse multiple <article> elements from a batched NCBI PMC efetch XML response, keyed by PMCID."""
     try:
         root = ET.fromstring(xml_body)
@@ -49,9 +49,9 @@ def parse_pmc_xml_many(xml_body: str) -> Dict[str, FulltextResult]:
     if not articles and root.tag == "article":
         articles = [root]
 
-    out: Dict[str, FulltextResult] = {}
+    out: dict[str, FulltextResult] = {}
     for art in articles:
-        pmcid: Optional[str] = None
+        pmcid: str | None = None
         for aid in art.findall(".//front//article-id"):
             ptype = (aid.attrib.get("pub-id-type") or "").lower()
             if ptype in ("pmc", "pmcid") and aid.text:
@@ -99,7 +99,7 @@ def _fetch_jats_fulltext(
     return FulltextResult(paragraphs=paragraphs, source=source_name)
 
 
-def fetch_epmc_fulltext_paragraphs(http: HttpClient, pmcid: str) -> Tuple[List[str], Optional[str]]:
+def fetch_epmc_fulltext_paragraphs(http: HttpClient, pmcid: str) -> tuple[list[str], str | None]:
     url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{urllib.parse.quote(pmcid)}/fullTextXML"
     res = _fetch_jats_fulltext(http, url, "Europe PMC fullTextXML", "Europe PMC")
     return res.paragraphs, res.error
@@ -109,7 +109,7 @@ def _resolve_fulltext_with_epmc_fallback(
     http: HttpClient,
     pmcid: str,
     ncbi_res: FulltextResult,
-    is_open_access: Optional[bool] = None,
+    is_open_access: bool | None = None,
 ) -> FulltextResult:
     """Resolve OA full-text when NCBI PMC did not yield body paragraphs."""
     if ncbi_res.paragraphs:
@@ -144,7 +144,7 @@ def _resolve_fulltext_with_epmc_fallback(
     )
 
 
-def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: Optional[bool] = None) -> FulltextResult:
+def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: bool | None = None) -> FulltextResult:
     """Fetch OA JATS full-text paragraphs from NCBI PMC first, falling back to Europe PMC."""
     ncbi_url = (
         f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={urllib.parse.quote(pmcid)}&retmode=xml"
@@ -156,9 +156,9 @@ def fetch_oa_fulltext_paragraphs(http: HttpClient, pmcid: str, is_open_access: O
 def fetch_oa_fulltext_batch(
     http: HttpClient,
     pmcids: Sequence[str],
-    oa_flags: Optional[Dict[str, Optional[bool]]] = None,
+    oa_flags: dict[str, bool | None] | None = None,
     max_workers: int = 4,
-) -> Dict[str, FulltextResult]:
+) -> dict[str, FulltextResult]:
     """Batch-fetch OA full-text JATS XML via NCBI PMC efetch, with concurrent Europe PMC fallback."""
     unique = list(dict.fromkeys(p.strip().upper() for p in pmcids if p and p.strip()))
     if not unique:
@@ -167,8 +167,8 @@ def fetch_oa_fulltext_batch(
         pid = unique[0]
         return {pid: fetch_oa_fulltext_paragraphs(http, pid, is_open_access=(oa_flags or {}).get(pid))}
 
-    out: Dict[str, FulltextResult] = {}
-    need_fallback: List[Tuple[str, FulltextResult]] = []
+    out: dict[str, FulltextResult] = {}
+    need_fallback: list[tuple[str, FulltextResult]] = []
 
     for i in range(0, len(unique), PMC_FULLTEXT_BATCH_SIZE):
         chunk = unique[i : i + PMC_FULLTEXT_BATCH_SIZE]
@@ -197,7 +197,7 @@ def fetch_oa_fulltext_batch(
 
     if need_fallback:
 
-        def _fallback_one(item: Tuple[str, FulltextResult]) -> Tuple[str, FulltextResult]:
+        def _fallback_one(item: tuple[str, FulltextResult]) -> tuple[str, FulltextResult]:
             pid, ncbi_res = item
             return pid, _resolve_fulltext_with_epmc_fallback(
                 http, pid, ncbi_res, is_open_access=(oa_flags or {}).get(pid)

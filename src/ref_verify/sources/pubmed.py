@@ -6,7 +6,8 @@ import json
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 from ref_verify.http_client import HttpClient, HttpResponse
 from ref_verify.models import Author, PaperRecord
@@ -38,7 +39,7 @@ def parse_pubmed_article_node(article_node: ET.Element) -> PaperRecord:
             rec.title = rec.title[:-1].strip()
 
     # Structured abstract
-    abs_parts: List[str] = []
+    abs_parts: list[str] = []
     for ab in article_node.findall(".//Article/Abstract/AbstractText"):
         label = (ab.attrib.get("Label") or "").strip()
         txt = re.sub(r"\s+", " ", "".join(ab.itertext())).strip()
@@ -120,7 +121,7 @@ def parse_pubmed_article_node(article_node: ET.Element) -> PaperRecord:
     return rec
 
 
-def parse_pubmed_xml(xml_text: str) -> Optional[PaperRecord]:
+def parse_pubmed_xml(xml_text: str) -> PaperRecord | None:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -133,13 +134,13 @@ def parse_pubmed_xml(xml_text: str) -> Optional[PaperRecord]:
     return parse_pubmed_article_node(article_node)
 
 
-def _parse_pubmed_xml_many_checked(xml_text: str) -> Tuple[Dict[str, PaperRecord], bool]:
+def _parse_pubmed_xml_many_checked(xml_text: str) -> tuple[dict[str, PaperRecord], bool]:
     """Parse all <PubmedArticle> elements, returning (records_by_pmid, xml_valid)."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return {}, False
-    out: Dict[str, PaperRecord] = {}
+    out: dict[str, PaperRecord] = {}
     for article_node in root.findall(".//PubmedArticle"):
         rec = parse_pubmed_article_node(article_node)
         if rec.pmid:
@@ -147,13 +148,13 @@ def _parse_pubmed_xml_many_checked(xml_text: str) -> Tuple[Dict[str, PaperRecord
     return out, True
 
 
-def parse_pubmed_xml_many(xml_text: str) -> Dict[str, PaperRecord]:
+def parse_pubmed_xml_many(xml_text: str) -> dict[str, PaperRecord]:
     """Parse all <PubmedArticle> elements in a batched efetch XML response, keyed by PMID."""
     parsed, _ = _parse_pubmed_xml_many_checked(xml_text)
     return parsed
 
 
-def fetch_pubmed_pmid(http: HttpClient, pmid: str) -> Tuple[Optional[PaperRecord], HttpResponse]:
+def fetch_pubmed_pmid(http: HttpClient, pmid: str) -> tuple[PaperRecord | None, HttpResponse]:
     url = (
         f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={urllib.parse.quote(pmid)}&retmode=xml"
     )
@@ -166,7 +167,7 @@ def fetch_pubmed_pmid(http: HttpClient, pmid: str) -> Tuple[Optional[PaperRecord
 
 def fetch_pubmed_pmids_batch(
     http: HttpClient, pmids: Sequence[str]
-) -> Tuple[Dict[str, Tuple[Optional[PaperRecord], HttpResponse]], bool]:
+) -> tuple[dict[str, tuple[PaperRecord | None, HttpResponse]], bool]:
     """Batch-fetch up to PUBMED_BATCH_SIZE PMIDs per single efetch XML request."""
     unique = list(dict.fromkeys(p for p in pmids if p))
     if not unique:
@@ -175,7 +176,7 @@ def fetch_pubmed_pmids_batch(
         rec, resp = fetch_pubmed_pmid(http, unique[0])
         return {unique[0]: (rec, resp)}, resp.status == 200
 
-    out: Dict[str, Tuple[Optional[PaperRecord], HttpResponse]] = {}
+    out: dict[str, tuple[PaperRecord | None, HttpResponse]] = {}
     all_ok = True
     for i in range(0, len(unique), PUBMED_BATCH_SIZE):
         chunk = unique[i : i + PUBMED_BATCH_SIZE]
@@ -198,73 +199,53 @@ def fetch_pubmed_pmids_batch(
     return out, all_ok
 
 
-def pubmed_esearch_by_doi(http: HttpClient, doi: str) -> Optional[str]:
-    term = f'"{doi}"[DOI]'
+ESEARCH_DOI_CHUNK = 25
+
+
+def _esearch(http: HttpClient, term: str, retmax: int) -> tuple[list[str], int] | None:
+    """Run one PubMed esearch; returns (ids, total_count) or None on HTTP/JSON failure."""
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(
-        {"db": "pubmed", "term": term, "retmode": "json", "retmax": "2"}
+        {"db": "pubmed", "term": term, "retmode": "json", "retmax": str(retmax)}
     )
     resp = http.get(url)
     if resp.status != 200:
         return None
     try:
-        ids = json.loads(resp.body).get("esearchresult", {}).get("idlist", [])
-        return str(ids[0]) if ids else None
-    except json.JSONDecodeError:
+        es_res = json.loads(resp.body).get("esearchresult", {})
+        ids = [str(i) for i in es_res.get("idlist", [])]
+        return ids, int(es_res.get("count", len(ids)) or 0)
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
         return None
 
 
-def pubmed_esearch_by_dois_batch(http: HttpClient, dois: Sequence[str]) -> Tuple[List[str], bool]:
-    """Batch-discover PMIDs for DOIs via OR-combined PubMed esearch queries."""
+def pubmed_esearch_by_doi(http: HttpClient, doi: str) -> str | None:
+    found = _esearch(http, f'"{doi}"[DOI]', retmax=2)
+    return found[0][0] if found and found[0] else None
+
+
+def pubmed_esearch_by_dois_batch(http: HttpClient, dois: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Batch-discover PMIDs for DOIs via OR-combined PubMed esearch queries.
+
+    Returns (pmids, checked_dois): ``checked_dois`` lists only DOIs from chunks that answered completely,
+    so a failed or truncated chunk sends just its own DOIs back to per-citation esearch.
+    """
     unique = list(dict.fromkeys(d for d in dois if d))
-    if not unique:
-        return [], True
-    if len(unique) == 1:
-        term = f'"{unique[0]}"[DOI]'
-        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(
-            {"db": "pubmed", "term": term, "retmode": "json", "retmax": "2"}
-        )
-        resp = http.get(url)
-        if resp.status != 200:
-            return [], False
-        try:
-            ids = json.loads(resp.body).get("esearchresult", {}).get("idlist", [])
-            return ([str(ids[0])] if ids else []), True
-        except json.JSONDecodeError:
-            return [], False
-
-    pmids: List[str] = []
-    seen: set[str] = set()
-    all_ok = True
-    for i in range(0, len(unique), 25):
-        chunk = unique[i : i + 25]
+    pmids: list[str] = []
+    checked: list[str] = []
+    for i in range(0, len(unique), ESEARCH_DOI_CHUNK):
+        chunk = unique[i : i + ESEARCH_DOI_CHUNK]
         retmax = len(chunk) * 2
-        term = " OR ".join(f'"{d}"[DOI]' for d in chunk)
-        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(
-            {"db": "pubmed", "term": term, "retmode": "json", "retmax": str(retmax)}
-        )
-        resp = http.get(url)
-        if resp.status != 200:
-            all_ok = False
+        found = _esearch(http, " OR ".join(f'"{d}"[DOI]' for d in chunk), retmax)
+        if found is None:
             continue
-        try:
-            es_res = json.loads(resp.body).get("esearchresult", {})
-            ids = es_res.get("idlist", [])
-            total_count = int(es_res.get("count", len(ids)) or 0)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            all_ok = False
-            continue
-        if total_count > retmax:
-            # Truncated result set: mark incomplete so missed DOIs still fall back individually.
-            all_ok = False
-        for pid in ids:
-            sp = str(pid)
-            if sp not in seen:
-                seen.add(sp)
-                pmids.append(sp)
-    return pmids, all_ok
+        ids, total_count = found
+        pmids.extend(ids)
+        if total_count <= retmax:
+            checked.extend(chunk)
+    return list(dict.fromkeys(pmids)), checked
 
 
-def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> List[Dict[str, Any]]:
+def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> list[dict[str, Any]]:
     # Clean special chars that break PubMed boolean queries
     clean_q = re.sub(r"[\[\]():\"']", " ", title)
     clean_q = re.sub(r"\s+", " ", clean_q).strip()
@@ -294,7 +275,7 @@ def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> Lis
     except json.JSONDecodeError:
         return []
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for pid in ids:
         item = sdata.get(str(pid))
         if not isinstance(item, dict):

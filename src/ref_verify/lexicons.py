@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
-
 # Common biomedical journal aliases (normalized lowercase alnum/space -> canonical key)
-JOURNAL_ALIASES: Dict[str, Tuple[str, ...]] = {
+JOURNAL_ALIASES: dict[str, tuple[str, ...]] = {
     "nejm": ("new england journal of medicine", "n engl j med", "nejm"),
     "jama": ("jama", "journal of the american medical association", "j am med assoc"),
     "lancet": ("lancet", "the lancet"),
@@ -204,7 +202,7 @@ SURNAME_PARTICLES = {
 }
 
 
-COHORT_SYNONYM_GROUPS: Dict[str, Tuple[str, ...]] = {
+COHORT_SYNONYM_GROUPS: dict[str, tuple[str, ...]] = {
     "t2dm": ("type 2 diabetes", "type 2 diabetes mellitus", "t2dm", "t2d"),
     "t1dm": ("type 1 diabetes", "type 1 diabetes mellitus", "t1dm", "t1d"),
     "diabetes": ("diabetes", "diabetic", "diabetics", "diabetes mellitus", "dm"),
@@ -271,7 +269,7 @@ COHORT_SYNONYM_GROUPS: Dict[str, Tuple[str, ...]] = {
 }
 
 
-COHORT_OPPOSITE_PAIRS: Tuple[Tuple[str, str], ...] = (
+COHORT_OPPOSITE_PAIRS: tuple[tuple[str, str], ...] = (
     ("women", "men"),
     ("hfref", "hfpef"),
     ("t1dm", "t2dm"),
@@ -284,7 +282,7 @@ COHORT_OPPOSITE_PAIRS: Tuple[Tuple[str, str], ...] = (
 
 
 # Negated cohort adjectives -> positive canonical group or stem
-NEGATED_COHORT_ADJECTIVES: Dict[str, str] = {
+NEGATED_COHORT_ADJECTIVES: dict[str, str] = {
     "nondiabetic": "diabetes",
     "non-diabetic": "diabetes",
     "normotensive": "hypertension",
@@ -504,7 +502,7 @@ NON_COHORT_WITH_WORDS = {
 }
 
 
-COHORT_GROUP_PARENTS: Dict[str, str] = {
+COHORT_GROUP_PARENTS: dict[str, str] = {
     "t2dm": "diabetes",
     "t1dm": "diabetes",
     "hfref": "heart_failure",
@@ -513,7 +511,7 @@ COHORT_GROUP_PARENTS: Dict[str, str] = {
 }
 
 
-POSITIVE_COHORT_ADJECTIVES: Tuple[str, ...] = (
+POSITIVE_COHORT_ADJECTIVES: tuple[str, ...] = (
     "diabetic",
     "hypertensive",
     "obese",

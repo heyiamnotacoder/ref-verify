@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import List, Sequence, Tuple
+from collections.abc import Sequence
 
 from ref_verify.lexicons import PHARMA_STEMS, STOPWORDS
 from ref_verify.text import normalize_text
@@ -45,10 +45,10 @@ BARE_NUMBER_RE = re.compile(
 )
 
 
-def extract_claim_numbers(claim: str) -> List[str]:
+def extract_claim_numbers(claim: str) -> list[str]:
     """Extract quantitative tokens (numbers, %, HRs, CIs, p-values, sample sizes) cleanly."""
     norm = normalize_text(claim)
-    tokens: List[str] = []
+    tokens: list[str] = []
     seen_core: set[str] = set()
 
     def _add(tok: str) -> None:
@@ -61,7 +61,7 @@ def extract_claim_numbers(claim: str) -> List[str]:
             tokens.append(t)
 
     # First collect rich structured tokens (so output displays "HR 0.74", "p < 0.001", "N=4,744", "16.3%")
-    covered_spans: List[Tuple[int, int]] = []
+    covered_spans: list[tuple[int, int]] = []
     for pat in QUANT_PATTERNS:
         for m in pat.finditer(norm):
             # Skip standalone "95%" if it is part of a "95% CI ..." match already captured
@@ -84,7 +84,7 @@ def extract_claim_numbers(claim: str) -> List[str]:
     return tokens
 
 
-def _numeric_subvalues(token: str) -> List[str]:
+def _numeric_subvalues(token: str) -> list[str]:
     """Return normalized numeric values inside a quantitative token (e.g. '95% CI 0.65-0.85' -> ['0.65', '0.85'])."""
     t = normalize_text(token).replace(",", "")
     # For '95% CI 0.65-0.85' or '95% confidence interval [CI], 0.65 to 0.85', check the interval endpoints
@@ -137,7 +137,7 @@ def _number_present_in_text(num_str: str, norm_text_no_commas: str, is_percent: 
     return bool(re.search(pat, norm_text_no_commas))
 
 
-def normalize_for_quant(text: str) -> Tuple[str, str]:
+def normalize_for_quant(text: str) -> tuple[str, str]:
     """Return (lowercase_normalized, comma_stripped_normalized) for quantitative token matching."""
     norm_text = normalize_text(text)
     norm_no_commas = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm_text)
@@ -162,15 +162,15 @@ def quant_token_in_text(token: str, text: str) -> bool:
     return quant_token_in_norm_text(token, norm_low, norm_no_commas)
 
 
-def extract_abstract_numbers(text: str) -> List[str]:
+def extract_abstract_numbers(text: str) -> list[str]:
     """Extract all notable quantitative expressions from the official abstract for side-by-side comparison."""
     return extract_claim_numbers(text)[:30]
 
 
-def extract_claim_keywords(claim: str) -> List[str]:
+def extract_claim_keywords(claim: str) -> list[str]:
     """Extract drug names, trial acronyms, and high-signal domain terms."""
     norm = normalize_text(claim)
-    keywords: List[str] = []
+    keywords: list[str] = []
     seen: set[str] = set()
 
     # Trial acronyms / uppercase biomedical tokens (e.g. DAPA-HF, EMPA-REG, HFrEF, SGLT2, HbA1c)
@@ -196,9 +196,9 @@ def extract_claim_keywords(claim: str) -> List[str]:
     return keywords[:15]
 
 
-def split_sentences(text: str) -> List[str]:
+def split_sentences(text: str) -> list[str]:
     # Split on newlines or sentence-ending punctuation followed by whitespace and uppercase/digit
-    parts: List[str] = []
+    parts: list[str] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -212,8 +212,8 @@ def split_sentences(text: str) -> List[str]:
 
 def find_top_matching_sentences(
     text_blocks: Sequence[str], quant_tokens: Sequence[str], keywords: Sequence[str], max_items: int = 4
-) -> List[str]:
-    scored: List[Tuple[int, int, str]] = []
+) -> list[str]:
+    scored: list[tuple[int, int, str]] = []
     kw_lows = [kw.lower() for kw in keywords]
     for idx, sent in enumerate(text_blocks):
         score = 0

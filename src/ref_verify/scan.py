@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-import zipfile
-from dataclasses import dataclass
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
 
 from ref_verify.identifiers import DOI_CORE_RE, strip_unbalanced_closing
-from ref_verify.models import CitationInput, Diagnostic
+from ref_verify.models import CitationInput, Diagnostic, UnlinkedEntry
 from ref_verify.text import truncate
 
 SCAN_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s<>\"'{}|\\^\[\]`]+)")
@@ -22,8 +20,10 @@ SCAN_PMID_RE = re.compile(
 )
 
 
-def _extract_segments_from_docx(path: Path) -> List[Tuple[str, str]]:
-    segments: List[Tuple[str, str]] = []
+def _extract_segments_from_docx(path: Path) -> list[tuple[str, str]]:
+    import zipfile
+
+    segments: list[tuple[str, str]] = []
     with zipfile.ZipFile(path, "r") as zf:
         names = [
             n
@@ -51,10 +51,12 @@ def _extract_segments_from_docx(path: Path) -> List[Tuple[str, str]]:
     return segments
 
 
-def _extract_segments_from_pptx(path: Path) -> List[Tuple[str, str]]:
-    segments: List[Tuple[str, str]] = []
+def _extract_segments_from_pptx(path: Path) -> list[tuple[str, str]]:
+    import zipfile
+
+    segments: list[tuple[str, str]] = []
     with zipfile.ZipFile(path, "r") as zf:
-        slide_files: List[Tuple[int, str, str]] = []
+        slide_files: list[tuple[int, str, str]] = []
         for name in zf.namelist():
             m_slide = re.match(r"^ppt/slides/slide(\d+)\.xml$", name)
             if m_slide:
@@ -71,7 +73,7 @@ def _extract_segments_from_pptx(path: Path) -> List[Tuple[str, str]]:
             except ET.ParseError:
                 continue
             label = f"Slide {num}" if kind == "slide" else f"Slide {num} notes"
-            paras: List[str] = []
+            paras: list[str] = []
             for elem in root.iter():
                 if elem.tag.endswith("}p") or elem.tag == "p":
                     texts = [t.text for t in elem.iter() if (t.tag.endswith("}t") or t.tag == "t") and t.text]
@@ -83,30 +85,40 @@ def _extract_segments_from_pptx(path: Path) -> List[Tuple[str, str]]:
     return segments
 
 
-def extract_text_segments(path: Path) -> List[Tuple[str, str]]:
+class ScanError(Exception):
+    """A document could not be read (missing, unreadable, or a corrupt .docx/.pptx archive)."""
+
+
+def extract_text_segments(path: Path) -> list[tuple[str, str]]:
+    """Return (location, text) segments; raises ScanError when the file cannot be read."""
+    import zipfile  # only .docx/.pptx need it; keep it off the import path of every run
+
     suffix = path.suffix.lower()
-    if suffix == ".docx":
-        return _extract_segments_from_docx(path)
-    if suffix == ".pptx":
-        return _extract_segments_from_pptx(path)
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        if suffix == ".docx":
+            return _extract_segments_from_docx(path)
+        if suffix == ".pptx":
+            return _extract_segments_from_pptx(path)
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ScanError(str(exc)) from exc
     return [(f"line {i}", line) for i, line in enumerate(raw.splitlines(), start=1) if line.strip()]
 
 
-def extract_citations_from_segments(segments: Sequence[Tuple[str, str]]) -> List[CitationInput]:
+def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
     """Extract deduplicated DOIs and PMIDs from text segments, pairing co-located DOI+PMID pairs."""
-    extracted: List[CitationInput] = []
+    extracted: list[CitationInput] = []
     seen_dois: set[str] = set()
     seen_pmids: set[str] = set()
 
     for loc, text in segments:
-        dois_found: List[Tuple[int, str]] = []
+        dois_found: list[tuple[int, str]] = []
         for m in SCAN_DOI_RE.finditer(text):
             cleaned, _ = strip_unbalanced_closing(m.group(1))
             if cleaned and DOI_CORE_RE.match(cleaned):
                 dois_found.append((m.start(), cleaned))
 
-        pmids_found: List[Tuple[int, str]] = []
+        pmids_found: list[tuple[int, str]] = []
         for m in SCAN_PMID_RE.finditer(text):
             pid = m.group(1) or m.group(2)
             if pid:
@@ -116,7 +128,7 @@ def extract_citations_from_segments(segments: Sequence[Tuple[str, str]]) -> List
         used_pmid_idxs: set[int] = set()
         for d_pos, doi in dois_found:
             d_key = doi.lower()
-            paired_pmid: Optional[str] = None
+            paired_pmid: str | None = None
             for idx, (p_pos, pmid) in enumerate(pmids_found):
                 if idx in used_pmid_idxs:
                     continue
@@ -189,12 +201,6 @@ def _is_bibliography_section_end(line: str) -> bool:
     return False
 
 
-@dataclass
-class UnlinkedEntry:
-    location: str
-    text: str
-
-
 def _segment_part_key(loc: str) -> str:
     if ":" in loc:
         return loc.split(":", 1)[0]
@@ -203,11 +209,11 @@ def _segment_part_key(loc: str) -> str:
     return "body"
 
 
-def extract_unlinked_bibliography_entries(segments: Sequence[Tuple[str, str]]) -> List[UnlinkedEntry]:
+def extract_unlinked_bibliography_entries(segments: Sequence[tuple[str, str]]) -> list[UnlinkedEntry]:
     """Find bibliography entries under a References/Bibliography heading that contain no DOI or PMID."""
-    unlinked: List[UnlinkedEntry] = []
+    unlinked: list[UnlinkedEntry] = []
     in_bib = False
-    prev_part: Optional[str] = None
+    prev_part: str | None = None
 
     for loc, text in segments:
         part = _segment_part_key(loc)
@@ -238,7 +244,7 @@ def extract_unlinked_bibliography_entries(segments: Sequence[Tuple[str, str]]) -
     return unlinked
 
 
-def build_unlinked_bibliography_diagnostic(entries: Sequence[UnlinkedEntry]) -> Optional[Diagnostic]:
+def build_unlinked_bibliography_diagnostic(entries: Sequence[UnlinkedEntry]) -> Diagnostic | None:
     if not entries:
         return None
     count = len(entries)
@@ -256,19 +262,3 @@ def build_unlinked_bibliography_diagnostic(entries: Sequence[UnlinkedEntry]) -> 
         hint="Plain-text citations (e.g. Vancouver references without DOIs/PMIDs) are invisible to identifier-only scanning.",
         fix="Add DOIs/PMIDs to bibliography entries or export them to JSON and run `ref-verify batch <refs.json>`.",
     )
-
-
-def format_unlinked_bibliography_text(diag: Diagnostic, entries: Sequence[UnlinkedEntry]) -> str:
-    lines = [
-        "-" * 78,
-        f"[*] [{diag.severity}] {diag.code}: {diag.message}",
-    ]
-    for entry in entries[:10]:
-        lines.append(f"    - {entry.location}: {truncate(entry.text, 110)}")
-    if len(entries) > 10:
-        lines.append(f"    ... and {len(entries) - 10} more")
-    if diag.hint:
-        lines.append(f"    Hint: {diag.hint}")
-    if diag.fix:
-        lines.append(f"    Fix : {diag.fix}")
-    return "\n".join(lines)

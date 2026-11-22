@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
 
-from ref_verify.models import VerificationResult
+from ref_verify.models import Diagnostic, UnlinkedEntry, VerificationResult
 from ref_verify.text import truncate
 
 
-def format_result_text(res: VerificationResult, index: Optional[int] = None, show_abstract: bool = True) -> str:
-    lines: List[str] = []
+def format_result_text(res: VerificationResult, index: int | None = None, show_abstract: bool = True) -> str:
+    lines: list[str] = []
     prefix = f"[{index}] " if index is not None else ""
     label = (
         res.input.label
@@ -138,13 +139,21 @@ def format_result_text(res: VerificationResult, index: Optional[int] = None, sho
     return "\n".join(lines)
 
 
-def format_summary_text(results: Sequence[VerificationResult], header: str = "SUMMARY") -> str:
-    total = len(results)
-    passed = sum(1 for r in results if r.status == "PASS")
-    warned = sum(1 for r in results if r.status == "WARN")
-    failed = sum(1 for r in results if r.status == "FAIL")
+def status_counts(results: Sequence[VerificationResult]) -> dict[str, int]:
+    """The total/pass/warn/fail summary shared by text and JSON output."""
+    statuses = [r.status for r in results]
+    return {
+        "total": len(statuses),
+        "pass": statuses.count("PASS"),
+        "warn": statuses.count("WARN"),
+        "fail": statuses.count("FAIL"),
+    }
 
-    code_counts: Dict[str, int] = {}
+
+def format_summary_text(results: Sequence[VerificationResult], header: str = "SUMMARY") -> str:
+    counts = status_counts(results)
+
+    code_counts: dict[str, int] = {}
     for r in results:
         for d in r.diagnostics:
             key = f"[{d.severity}] {d.code}"
@@ -152,7 +161,7 @@ def format_summary_text(results: Sequence[VerificationResult], header: str = "SU
 
     lines = [
         "=" * 78,
-        f"{header}: total={total} | PASS={passed} | WARN={warned} | FAIL={failed}",
+        f"{header}: total={counts['total']} | PASS={counts['pass']} | WARN={counts['warn']} | FAIL={counts['fail']}",
     ]
     if code_counts:
         lines.append("DIAGNOSTIC COUNTS:")
@@ -162,5 +171,21 @@ def format_summary_text(results: Sequence[VerificationResult], header: str = "SU
     return "\n".join(lines)
 
 
-def result_to_dict(res: VerificationResult) -> Dict[str, Any]:
+def result_to_dict(res: VerificationResult) -> dict[str, Any]:
     return asdict(res)
+
+
+def format_unlinked_bibliography_text(diag: Diagnostic, entries: Sequence[UnlinkedEntry]) -> str:
+    lines = [
+        "-" * 78,
+        f"[*] [{diag.severity}] {diag.code}: {diag.message}",
+    ]
+    for entry in entries[:10]:
+        lines.append(f"    - {entry.location}: {truncate(entry.text, 110)}")
+    if len(entries) > 10:
+        lines.append(f"    ... and {len(entries) - 10} more")
+    if diag.hint:
+        lines.append(f"    Hint: {diag.hint}")
+    if diag.fix:
+        lines.append(f"    Fix : {diag.fix}")
+    return "\n".join(lines)

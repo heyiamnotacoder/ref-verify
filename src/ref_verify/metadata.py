@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import difflib
 import re
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from ref_verify.lexicons import SURNAME_PARTICLES
-from ref_verify.models import Author, Diagnostic, PaperRecord
+from ref_verify.models import Author, CitationInput, Diagnostic, PaperRecord
 from ref_verify.text import (
     journal_alias_group,
     normalize_journal,
@@ -18,7 +18,7 @@ from ref_verify.text import (
 )
 
 
-def merge_records(records: Sequence[Optional[PaperRecord]]) -> Optional[PaperRecord]:
+def merge_records(records: Sequence[PaperRecord | None]) -> PaperRecord | None:
     valid = [r for r in records if r is not None]
     if not valid:
         return None
@@ -78,7 +78,7 @@ def merge_records(records: Sequence[Optional[PaperRecord]]) -> Optional[PaperRec
     return merged
 
 
-def check_title(cited_title: str, official_title: str) -> Optional[Diagnostic]:
+def check_title(cited_title: str, official_title: str) -> Diagnostic | None:
     sim = title_similarity(cited_title, official_title)
     cited_toks = tokenize_words(cited_title)
     off_toks = tokenize_words(official_title)
@@ -139,7 +139,7 @@ def check_title(cited_title: str, official_title: str) -> Optional[Diagnostic]:
     )
 
 
-def _extract_cited_surname_candidates(cited_author: str) -> List[str]:
+def _extract_cited_surname_candidates(cited_author: str) -> list[str]:
     s = normalize_text(cited_author)
     s = re.sub(r"\bet\s+al\.?$", "", s, flags=re.IGNORECASE).strip(" ,.;")
     if not s:
@@ -155,7 +155,7 @@ def _extract_cited_surname_candidates(cited_author: str) -> List[str]:
     if len(parts) == 1:
         return [parts[0].lower()]
 
-    cands: List[str] = []
+    cands: list[str] = []
     # Check if trailing token(s) are initials (e.g. "McMurray JJV" or "Patel R" or "Smith J A")
     last_tok = parts[-1]
     looks_like_initials = (len(last_tok) <= 4 and last_tok.isupper() and last_tok.isalpha()) or (
@@ -192,7 +192,7 @@ def _extract_cited_surname_candidates(cited_author: str) -> List[str]:
     return uniq
 
 
-def _author_matches(cited_cands: List[str], cited_full_norm: str, author: Author) -> bool:
+def _author_matches(cited_cands: list[str], cited_full_norm: str, author: Author) -> bool:
     if author.collective:
         coll = normalize_text(author.collective).lower()
         return cited_full_norm in coll or coll in cited_full_norm
@@ -212,7 +212,7 @@ def _author_matches(cited_cands: List[str], cited_full_norm: str, author: Author
     return False
 
 
-def check_author(cited_author: str, authors: List[Author]) -> Optional[Diagnostic]:
+def check_author(cited_author: str, authors: list[Author]) -> Diagnostic | None:
     if not authors:
         return Diagnostic(
             code="AUTHOR_MISMATCH",
@@ -234,7 +234,7 @@ def check_author(cited_author: str, authors: List[Author]) -> Optional[Diagnosti
     preview_list = display_list[:10] + ([f"... ({len(display_list)} total)"] if len(display_list) > 10 else [])
 
     # Check if cited author appears as middle/last author
-    matched_positions: List[Tuple[int, str]] = []
+    matched_positions: list[tuple[int, str]] = []
     for idx, au in enumerate(authors[1:], start=2):
         if _author_matches(cands, cited_norm, au):
             matched_positions.append((idx, au.display))
@@ -282,7 +282,7 @@ def check_author(cited_author: str, authors: List[Author]) -> Optional[Diagnosti
     )
 
 
-def check_year(cited_year_raw: str, rec: PaperRecord) -> Optional[Diagnostic]:
+def check_year(cited_year_raw: str, rec: PaperRecord) -> Diagnostic | None:
     cited_yr = parse_year_int(cited_year_raw)
     if cited_yr is None:
         return Diagnostic(
@@ -350,7 +350,7 @@ def check_year(cited_year_raw: str, rec: PaperRecord) -> Optional[Diagnostic]:
     )
 
 
-def check_journal(cited_journal: str, rec: PaperRecord) -> Optional[Diagnostic]:
+def check_journal(cited_journal: str, rec: PaperRecord) -> Diagnostic | None:
     variants = rec.journal_variants()
     if not variants:
         return None
@@ -407,8 +407,8 @@ def check_journal(cited_journal: str, rec: PaperRecord) -> Optional[Diagnostic]:
     )
 
 
-def check_retraction_and_notices(rec: PaperRecord) -> List[Diagnostic]:
-    diags: List[Diagnostic] = []
+def check_retraction_and_notices(rec: PaperRecord) -> list[Diagnostic]:
+    diags: list[Diagnostic] = []
     if rec.retracted:
         reasons = (
             "; ".join(rec.retraction_reasons)
@@ -468,3 +468,14 @@ def check_retraction_and_notices(rec: PaperRecord) -> List[Diagnostic]:
             )
         )
     return diags
+
+
+def check_metadata(cit: CitationInput, resolved: PaperRecord) -> list[Diagnostic]:
+    """All record-level checks for a resolved paper: notices first, then cited title/author/year/journal."""
+    checks = [
+        check_title(cit.title, resolved.title) if cit.title and resolved.title else None,
+        check_author(cit.author, resolved.authors) if cit.author else None,
+        check_year(str(cit.year), resolved) if cit.year is not None and str(cit.year).strip() != "" else None,
+        check_journal(cit.journal, resolved) if cit.journal else None,
+    ]
+    return check_retraction_and_notices(resolved) + [d for d in checks if d is not None]

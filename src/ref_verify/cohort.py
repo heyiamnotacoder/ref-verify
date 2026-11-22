@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from ref_verify.lexicons import (
     COHORT_GENERIC_WORDS,
@@ -22,24 +23,20 @@ from ref_verify.models import Diagnostic, PaperRecord
 from ref_verify.quant import extract_claim_numbers, normalize_for_quant, quant_token_in_norm_text, split_sentences
 from ref_verify.text import normalize_text, truncate
 
-_COHORT_PHRASE_TO_GROUP: Dict[str, str] = {}
+
+def _alias_key(alias: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", alias.lower())).strip()
 
 
-_COHORT_SINGLE_TO_GROUP: Dict[str, str] = {}
-
-
-for _grp, _aliases in COHORT_SYNONYM_GROUPS.items():
-    for _al in _aliases:
-        _norm_al = re.sub(r"[^a-z0-9\s]", " ", _al.lower())
-        _norm_al = re.sub(r"\s+", " ", _norm_al).strip()
-        if " " in _norm_al:
-            _COHORT_PHRASE_TO_GROUP[_norm_al] = _grp
-        else:
-            _COHORT_SINGLE_TO_GROUP[_norm_al] = _grp
+_ALIAS_TO_GROUP: dict[str, str] = {
+    _alias_key(alias): grp for grp, aliases in COHORT_SYNONYM_GROUPS.items() for alias in aliases
+}
+_COHORT_PHRASE_TO_GROUP: dict[str, str] = {k: g for k, g in _ALIAS_TO_GROUP.items() if " " in k}
+_COHORT_SINGLE_TO_GROUP: dict[str, str] = {k: g for k, g in _ALIAS_TO_GROUP.items() if " " not in k}
 
 
 # Ordered longest-first so "type 2 diabetes" matches before "diabetes"
-_COHORT_MULTI_PHRASES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = tuple(
+_COHORT_MULTI_PHRASES: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
     (
         phrase,
         grp,
@@ -49,12 +46,15 @@ _COHORT_MULTI_PHRASES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = tuple(
 )
 
 
-_COHORT_OPPOSITES_MAP: Dict[str, set[str]] = {}
+def _symmetric_opposites(pairs: Sequence[tuple[str, str]]) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for a, b in pairs:
+        out.setdefault(a, set()).add(b)
+        out.setdefault(b, set()).add(a)
+    return out
 
 
-for _a, _b in COHORT_OPPOSITE_PAIRS:
-    _COHORT_OPPOSITES_MAP.setdefault(_a, set()).add(_b)
-    _COHORT_OPPOSITES_MAP.setdefault(_b, set()).add(_a)
+_COHORT_OPPOSITES_MAP = _symmetric_opposites(COHORT_OPPOSITE_PAIRS)
 
 
 _OVERALL_ENDPOINT_FOLLOW = (
@@ -238,7 +238,7 @@ _COHORT_KNOWN_COND_RE = re.compile(
 _AGE_LEFT_BOUND = r"(?<![A-Za-z0-9.])"
 
 
-_AGE_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+_AGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "range",
         re.compile(r"\baged?\s+(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?\b", re.IGNORECASE),
@@ -287,9 +287,9 @@ _AGE_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
 class AgeBound:
     op: str  # ">=" | ">" | "<=" | "<" | "range"
     lo: float
-    hi: Optional[float] = None
+    hi: float | None = None
 
-    def to_interval(self) -> Tuple[float, bool, float, bool]:
+    def to_interval(self) -> tuple[float, bool, float, bool]:
         if self.op == "range" and self.hi is not None:
             return (self.lo, True, self.hi, True)
         if self.op == ">=":
@@ -300,7 +300,7 @@ class AgeBound:
             return (float("-inf"), False, self.lo, True)
         return (float("-inf"), False, self.lo, False)
 
-    def conflicts_with(self, other: "AgeBound") -> bool:
+    def conflicts_with(self, other: AgeBound) -> bool:
         a_lo, a_lo_inc, a_hi, a_hi_inc = self.to_interval()
         b_lo, b_lo_inc, b_hi, b_hi_inc = other.to_interval()
         if a_hi < b_lo or (a_hi == b_lo and not (a_hi_inc and b_lo_inc)):
@@ -320,8 +320,8 @@ class AgeBound:
 
 @dataclass(frozen=True)
 class CohortTerms:
-    groups: Tuple[str, ...]
-    core_terms: Tuple[str, ...]
+    groups: tuple[str, ...]
+    core_terms: tuple[str, ...]
 
     def __bool__(self) -> bool:
         return bool(self.groups or self.core_terms)
@@ -332,22 +332,22 @@ class CohortQualifier:
     raw: str
     polarity: str  # "with" | "without"
     terms: CohortTerms
-    sub_conditions: Tuple[CohortTerms, ...] = ()
-    age_bounds: Optional[AgeBound] = None
+    sub_conditions: tuple[CohortTerms, ...] = ()
+    age_bounds: AgeBound | None = None
 
     @property
-    def groups(self) -> Tuple[str, ...]:
+    def groups(self) -> tuple[str, ...]:
         return self.terms.groups
 
     @property
-    def core_terms(self) -> Tuple[str, ...]:
+    def core_terms(self) -> tuple[str, ...]:
         return self.terms.core_terms
 
 
 @dataclass(frozen=True)
 class CohortContext:
     text: str
-    qualifiers: Tuple[CohortQualifier, ...]
+    qualifiers: tuple[CohortQualifier, ...]
 
 
 @dataclass(frozen=True)
@@ -365,7 +365,7 @@ class SourceClause:
     norm_no_commas: str
     is_enrollment: bool
     is_subgroup: bool
-    qualifiers: Tuple[CohortQualifier, ...]
+    qualifiers: tuple[CohortQualifier, ...]
     from_fulltext: bool = False
 
 
@@ -373,8 +373,8 @@ class SourceClause:
 class SubgroupIssue:
     reason: str
     token: str
-    source_cohorts: Tuple[str, ...]
-    source_clauses: Tuple[str, ...]
+    source_cohorts: tuple[str, ...]
+    source_clauses: tuple[str, ...]
 
 
 def _is_drug_word(word: str) -> bool:
@@ -401,8 +401,8 @@ def _groups_overlap_for_polarity(groups_a: Sequence[str], groups_b: Sequence[str
     return False
 
 
-def _extract_stage_class_tokens(norm_text: str) -> List[str]:
-    tokens: List[str] = []
+def _extract_stage_class_tokens(norm_text: str) -> list[str]:
+    tokens: list[str] = []
     for m in _STAGE_CLASS_TOKEN_RE.finditer(norm_text):
         prefix = m.group(1).lower() + "_" if m.group(1) else ""
         kind = m.group(2).lower()
@@ -414,12 +414,18 @@ def _extract_stage_class_tokens(norm_text: str) -> List[str]:
     return tokens
 
 
+@functools.lru_cache(maxsize=8192)
 def _extract_groups_and_core_terms(phrase: str) -> CohortTerms:
+    """Cached: the same clause and context texts are re-examined many times per claim."""
+    return _extract_groups_and_core_terms_uncached(phrase)
+
+
+def _extract_groups_and_core_terms_uncached(phrase: str) -> CohortTerms:
     """Map a cohort phrase into canonical synonym groups and remaining core tokens."""
     norm = re.sub(r"[^a-z0-9≥≤<>=%.+/\-]", " ", normalize_text(phrase).lower())
     norm = re.sub(r"\s+", " ", norm).strip()
-    groups: List[str] = []
-    consumed_spans: List[Tuple[int, int]] = []
+    groups: list[str] = []
+    consumed_spans: list[tuple[int, int]] = []
 
     for _, grp, pat in _COHORT_MULTI_PHRASES:
         for m in pat.finditer(norm):
@@ -430,7 +436,7 @@ def _extract_groups_and_core_terms(phrase: str) -> CohortTerms:
                 groups.append(grp)
 
     # Extract structured stage/class/grade tokens (e.g. "NYHA class III/IV" -> "nyha_class_iii", "nyha_class_iv")
-    core_terms: List[str] = _extract_stage_class_tokens(norm)
+    core_terms: list[str] = _extract_stage_class_tokens(norm)
     for m in _STAGE_CLASS_TOKEN_RE.finditer(norm):
         consumed_spans.append((m.start(), m.end()))
 
@@ -479,7 +485,7 @@ def _extract_groups_and_core_terms(phrase: str) -> CohortTerms:
     return CohortTerms(tuple(groups), tuple(core_terms))
 
 
-def _split_sub_conditions(phrase: str) -> List[str]:
+def _split_sub_conditions(phrase: str) -> list[str]:
     """Split compound 'X and Y' phrases unless the full phrase is a single known multi-word cohort."""
     norm = re.sub(r"[^a-z0-9\s]", " ", normalize_text(phrase).lower())
     norm = re.sub(r"\s+", " ", norm).strip()
@@ -493,8 +499,14 @@ def _split_sub_conditions(phrase: str) -> List[str]:
     return parts if len(parts) > 1 else [phrase]
 
 
-def _extract_age_bounds(text: str) -> List[Tuple[str, AgeBound]]:
-    out: List[Tuple[str, AgeBound]] = []
+@functools.lru_cache(maxsize=8192)
+def _extract_age_bounds(text: str) -> tuple[tuple[str, AgeBound], ...]:
+    """Cached (immutable result): the same clause texts are re-examined many times per claim."""
+    return tuple(_extract_age_bounds_uncached(text))
+
+
+def _extract_age_bounds_uncached(text: str) -> list[tuple[str, AgeBound]]:
+    out: list[tuple[str, AgeBound]] = []
     norm = normalize_text(text)
     for op, pat in _AGE_PATTERNS:
         for m in pat.finditer(norm):
@@ -512,12 +524,12 @@ def _make_cohort_qualifier(
     raw: str,
     polarity: str,
     phrase: str,
-    age_bounds: Optional[AgeBound] = None,
-) -> Optional[CohortQualifier]:
+    age_bounds: AgeBound | None = None,
+) -> CohortQualifier | None:
     terms = _extract_groups_and_core_terms(phrase)
     if not terms and age_bounds is None:
         return None
-    sub_conds: List[CohortTerms] = []
+    sub_conds: list[CohortTerms] = []
     for sub in _split_sub_conditions(phrase):
         st = _extract_groups_and_core_terms(sub)
         if st:
@@ -531,15 +543,21 @@ def _make_cohort_qualifier(
     )
 
 
-def extract_cohort_qualifiers(text: str) -> List[CohortQualifier]:
+@functools.lru_cache(maxsize=8192)
+def extract_cohort_qualifiers(text: str) -> tuple[CohortQualifier, ...]:
+    """Cached (immutable result): the same clause texts are re-examined many times per claim."""
+    return tuple(_extract_cohort_qualifiers_uncached(text))
+
+
+def _extract_cohort_qualifiers_uncached(text: str) -> list[CohortQualifier]:
     """Extract structured patient cohort/subgroup qualifiers from a claim or source clause."""
     norm = SECTION_HEADER_RE.sub("", normalize_text(text)).strip()
     if not norm:
         return []
-    qualifiers: List[CohortQualifier] = []
-    seen_keys: set[Tuple[str, CohortTerms, Optional[AgeBound]]] = set()
+    qualifiers: list[CohortQualifier] = []
+    seen_keys: set[tuple[str, CohortTerms, AgeBound | None]] = set()
 
-    def _add(q: Optional[CohortQualifier]) -> None:
+    def _add(q: CohortQualifier | None) -> None:
         if q is None:
             return
         key = (q.polarity, q.terms, q.age_bounds)
@@ -642,11 +660,11 @@ def extract_cohort_qualifiers(text: str) -> List[CohortQualifier]:
     return qualifiers
 
 
-def _split_top_level(text: str, sep_re: re.Pattern[str]) -> List[str]:
+def _split_top_level(text: str, sep_re: re.Pattern[str]) -> list[str]:
     """Split text at regex matches occurring outside parentheses/brackets."""
-    parts: List[str] = []
+    parts: list[str] = []
     depth = 0
-    cut_positions: List[Tuple[int, int]] = []
+    cut_positions: list[tuple[int, int]] = []
     matches = list(sep_re.finditer(text))
     if not matches:
         return [text]
@@ -690,18 +708,18 @@ _CLAUSE_SEP_RE = re.compile(
 )
 
 
-_COMPOUND_COHORT_SEPS: Tuple[re.Pattern[str], ...] = (
+_COMPOUND_COHORT_SEPS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:,\s*and\s+|\s+and\s+)", re.IGNORECASE),
     re.compile(r",?\s+(?:vs\.?|versus)\s+", re.IGNORECASE),
     re.compile(r",\s+"),
 )
 
 
-def _split_compound_cohort_segment(seg: str) -> List[str]:
+def _split_compound_cohort_segment(seg: str) -> list[str]:
     """Split a multi-cohort segment on top-level conjunctions when every part carries both cohort & number."""
     parts = [seg]
     for sep_re in _COMPOUND_COHORT_SEPS:
-        next_parts: List[str] = []
+        next_parts: list[str] = []
         for piece in parts:
             if len(extract_cohort_qualifiers(piece)) < 2:
                 next_parts.append(piece)
@@ -715,10 +733,10 @@ def _split_compound_cohort_segment(seg: str) -> List[str]:
     return parts
 
 
-def _split_clauses(sentence: str) -> List[str]:
+def _split_clauses(sentence: str) -> list[str]:
     """Split a sentence into top-level clauses without breaking parenthetical statistics."""
     initial = _split_top_level(sentence, _CLAUSE_SEP_RE)
-    out: List[str] = []
+    out: list[str] = []
     for seg in initial:
         out.extend(_split_compound_cohort_segment(seg))
     return out
@@ -856,9 +874,9 @@ def _collect_raw_clauses(
     *,
     from_fulltext: bool,
     track_sections: bool,
-) -> List[RawClauseEntry]:
+) -> list[RawClauseEntry]:
     """Split text blocks into raw clauses while preserving structured section context and per-clause subgroup scope."""
-    entries: List[RawClauseEntry] = []
+    entries: list[RawClauseEntry] = []
     in_enrollment_section = False
 
     for block in blocks:
@@ -901,16 +919,16 @@ def _collect_raw_clauses(
 def _build_source_clauses(
     rec: PaperRecord,
     fulltext_paragraphs: Sequence[str] = (),
-) -> Tuple[List[SourceClause], CohortContext]:
+) -> tuple[list[SourceClause], CohortContext]:
     """Parse abstract (+ optional OA fulltext) into clauses and detect subgroup scoping."""
-    raw_entries: List[RawClauseEntry] = []
+    raw_entries: list[RawClauseEntry] = []
     if rec.abstract:
         raw_entries.extend(_collect_raw_clauses([rec.abstract], from_fulltext=False, track_sections=True))
     if fulltext_paragraphs:
         raw_entries.extend(_collect_raw_clauses(fulltext_paragraphs, from_fulltext=True, track_sections=False))
 
     # Build baseline overall-population context (title + enrollment clauses)
-    overall_parts: List[str] = []
+    overall_parts: list[str] = []
     if rec.title:
         overall_parts.append(rec.title)
     for entry in raw_entries:
@@ -923,7 +941,7 @@ def _build_source_clauses(
     )
 
     total_abstract_clauses = sum(1 for e in raw_entries if not e.from_fulltext)
-    clauses: List[SourceClause] = []
+    clauses: list[SourceClause] = []
 
     for entry in raw_entries:
         c_quals = tuple(extract_cohort_qualifiers(entry.text))
@@ -987,7 +1005,7 @@ def check_claim_cohort(
     rec: PaperRecord,
     matched_numbers: Sequence[str],
     fulltext_paragraphs: Sequence[str] = (),
-) -> Optional[Diagnostic]:
+) -> Diagnostic | None:
     """Verify that matched quantitative tokens belong to the cohort/subgroup stated in the claim."""
     if not matched_numbers or (not rec.abstract and not fulltext_paragraphs):
         return None
@@ -1003,7 +1021,7 @@ def check_claim_cohort(
     claim_mentions_subgroup = bool(SUBGROUP_CUE_RE.search(norm_claim))
 
     # Locate source clauses matching each matched quantitative token
-    token_clauses: Dict[str, List[SourceClause]] = {}
+    token_clauses: dict[str, list[SourceClause]] = {}
     for raw_tok in matched_numbers:
         clean_tok = re.sub(r"\s+\[fulltext\]$", "", raw_tok)
         hits = [c for c in clauses if quant_token_in_norm_text(clean_tok, c.norm_low, c.norm_no_commas)]
@@ -1014,7 +1032,7 @@ def check_claim_cohort(
         return None
 
     # Check 1: Tokens that ONLY appear in subgroup-scoped clauses
-    subgroup_only_issues: List[SubgroupIssue] = []
+    subgroup_only_issues: list[SubgroupIssue] = []
     for tok, hits in token_clauses.items():
         if not all(c.is_subgroup for c in hits):
             continue
@@ -1119,12 +1137,12 @@ def check_claim_cohort(
         results_tokens = {tok: hits for tok, hits in token_clauses.items() if any(not c.is_enrollment for c in hits)}
         tokens_to_check = results_tokens if results_tokens else token_clauses
 
-        unsupported_cohorts: List[str] = []
-        mismatched_tokens: List[str] = []
-        mismatched_clauses: List[str] = []
+        unsupported_cohorts: list[str] = []
+        mismatched_tokens: list[str] = []
+        mismatched_clauses: list[str] = []
 
         for tok, hits in tokens_to_check.items():
-            tok_unsupported: List[str] = []
+            tok_unsupported: list[str] = []
             for cq in claim_qualifiers:
                 supported = any(
                     not _qualifiers_conflict(cq, c.qualifiers)

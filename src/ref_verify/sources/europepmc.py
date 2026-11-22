@@ -5,7 +5,8 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import urllib.parse
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 from ref_verify.http_client import HttpClient, HttpResponse
 from ref_verify.models import Author, PaperRecord
@@ -14,7 +15,7 @@ from ref_verify.text import parse_year_int, strip_tags
 EPMC_BATCH_SIZE = 20
 
 
-def parse_epmc_result(item: Dict[str, Any]) -> PaperRecord:
+def parse_epmc_result(item: dict[str, Any]) -> PaperRecord:
     rec = PaperRecord(sources=["europepmc"])
     if item.get("doi"):
         rec.doi = str(item["doi"]).strip()
@@ -89,12 +90,12 @@ def parse_epmc_result(item: Dict[str, Any]) -> PaperRecord:
 
 def fetch_epmc(
     http: HttpClient,
-    doi: Optional[str] = None,
-    pmid: Optional[str] = None,
+    doi: str | None = None,
+    pmid: str | None = None,
     *,
     fallback: bool = False,
     primary_failed_transient: bool = False,
-) -> Tuple[Optional[PaperRecord], HttpResponse]:
+) -> tuple[PaperRecord | None, HttpResponse]:
     if doi:
         query = f'DOI:"{doi}"'
     elif pmid:
@@ -135,16 +136,16 @@ def fetch_epmc_batch(
     max_workers: int = 4,
     *,
     fallback: bool = False,
-) -> Tuple[
-    Dict[str, Tuple[Optional[PaperRecord], HttpResponse]],
-    Dict[str, Tuple[Optional[PaperRecord], HttpResponse]],
+) -> tuple[
+    dict[str, tuple[PaperRecord | None, HttpResponse]],
+    dict[str, tuple[PaperRecord | None, HttpResponse]],
 ]:
     """Batch-fetch Europe PMC core records for DOIs and PMIDs using OR queries.
 
     Returns (by_doi_lower, by_pmid). Definitive misses from complete HTTP 200 pages
     are stored as (None, resp) so callers avoid redundant single-item re-queries.
     """
-    terms: List[Tuple[str, str, str]] = []
+    terms: list[tuple[str, str, str]] = []
     seen_dois: set[str] = set()
     for d in dois:
         low = d.lower()
@@ -163,10 +164,10 @@ def fetch_epmc_batch(
     chunks = [terms[i : i + EPMC_BATCH_SIZE] for i in range(0, len(terms), EPMC_BATCH_SIZE)]
 
     def _fetch_chunk(
-        chunk: List[Tuple[str, str, str]],
-    ) -> Tuple[
-        Dict[str, Tuple[Optional[PaperRecord], HttpResponse]],
-        Dict[str, Tuple[Optional[PaperRecord], HttpResponse]],
+        chunk: list[tuple[str, str, str]],
+    ) -> tuple[
+        dict[str, tuple[PaperRecord | None, HttpResponse]],
+        dict[str, tuple[PaperRecord | None, HttpResponse]],
     ]:
         page_size = len(chunk) + 10
         query = " OR ".join(t[2] for t in chunk)
@@ -185,8 +186,8 @@ def fetch_epmc_batch(
         except json.JSONDecodeError:
             return {}, {}
 
-        c_doi: Dict[str, Tuple[Optional[PaperRecord], HttpResponse]] = {}
-        c_pmid: Dict[str, Tuple[Optional[PaperRecord], HttpResponse]] = {}
+        c_doi: dict[str, tuple[PaperRecord | None, HttpResponse]] = {}
+        c_pmid: dict[str, tuple[PaperRecord | None, HttpResponse]] = {}
         for item in results:
             if not isinstance(item, dict):
                 continue
@@ -205,8 +206,8 @@ def fetch_epmc_batch(
                     c_pmid[key] = (None, resp)
         return c_doi, c_pmid
 
-    by_doi: Dict[str, Tuple[Optional[PaperRecord], HttpResponse]] = {}
-    by_pmid: Dict[str, Tuple[Optional[PaperRecord], HttpResponse]] = {}
+    by_doi: dict[str, tuple[PaperRecord | None, HttpResponse]] = {}
+    by_pmid: dict[str, tuple[PaperRecord | None, HttpResponse]] = {}
     if len(chunks) == 1:
         c_doi, c_pmid = _fetch_chunk(chunks[0])
         by_doi.update(c_doi)
