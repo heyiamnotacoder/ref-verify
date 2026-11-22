@@ -25,7 +25,7 @@ flowchart LR
 - **PMID–DOI conflict detection** — Flags `CRITICAL` errors when a cited DOI and PMID point to different papers.
 - **Retraction & editorial notice checks** — Detects retracted papers (`CRITICAL`), expressions of concern (`WARNING`), retraction notices (`WARNING`), and errata/corrections (`INFO`).
 - **Field-level metadata diffs** — Checks title (distinguishing subtitle truncation from wrong papers via similarity + token diffs), first author (distinguishing co-author position from absent authors), publication year (distinguishing ±1-year epub-ahead-of-print offsets), and journal name/abbreviation (with biomedical alias normalization).
-- **Quantitative claim grounding** — Extracts numbers, percentages, HR/OR/RR, 95% CIs, p-values, sample sizes, and doses from a claim, diffs them against the official abstract (and Europe PMC Open Access `fullTextXML` with `--fulltext`), and prints the matched sentences plus full abstract.
+- **Quantitative claim grounding** — Extracts numbers, percentages, HR/OR/RR, 95% CIs, p-values, sample sizes, and doses from a claim, diffs them against the official abstract (and Open Access JATS full-text XML from Europe PMC with NCBI PMC fallback when `--fulltext` is passed), and prints the matched sentences plus full abstract.
 - **Document scanning** — Extracts and verifies every DOI and PMID directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes).
 - **Zero runtime dependencies** — Pure Python 3.10+ standard library. Runs anywhere without virtualenvs or compiled wheels.
 
@@ -77,7 +77,7 @@ ref-verify check \
   --claim "Dapagliflozin 10 mg in 4,744 patients reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85, p<0.001)."
 ```
 
-Add `--fulltext` when a claim references subgroup or secondary outcomes that live outside the abstract (fetches Europe PMC Open Access XML whenever a PMCID exists).
+Add `--fulltext` when a claim references subgroup or secondary outcomes that live outside the abstract (fetches Open Access JATS full-text XML from Europe PMC with NCBI PMC fallback whenever a PMCID exists).
 
 ### 2. Batch-verify a bibliography (`JSON` file or `stdin`)
 
@@ -215,8 +215,8 @@ CLAIM_CHECK:
 
 ## Scope & Limitations
 
-- **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Europe PMC OA full text—never from model memory.
-- **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without a Europe PMC Open Access XML copy, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
+- **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Open Access full text (Europe PMC / NCBI PMC)—never from model memory.
+- **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without an Open Access XML copy in Europe PMC or NCBI PMC, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
 
 ---
 

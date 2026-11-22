@@ -355,10 +355,10 @@ class TestClaimValidityPack(unittest.TestCase):
         self.assertTrue(rv.quant_token_in_text("HR 0.74", "Hazard ratio was .74 in the main analysis."))
 
     def test_percentage_does_not_match_unrelated_integers_or_identifiers(self) -> None:
-        # Regression for refs 4, 12, 15: percentages must not match "phase 3", "JAK1", "group 1", or "1-year"
+        # Regression for refs 4, 12, 15 + code-review edge case: comma/conjunction after bare integers
         text = (
-            "In phase 3 trials of oral JAK1 inhibitors, group 1 TCS had 1-year prevalence "
-            "ranging from 0.96% to 22.6% and rates of 0.5-1.3%."
+            "In phase 3, 22.6% of patients in group 1 and 50% of oral JAK1 recipients had "
+            "1-year prevalence ranging from 0.96% to 22.6% and rates of 0.5-1.3%."
         )
         self.assertFalse(rv.quant_token_in_text("3%", text))
         self.assertFalse(rv.quant_token_in_text("1%", text))
@@ -379,18 +379,21 @@ class TestClaimValidityPack(unittest.TestCase):
         self.assertFalse(rv.quant_token_in_text("16", "The mean score was 16.3."))
 
     def test_middle_dot_decimals_normalized_for_extraction_and_matching(self) -> None:
-        # Regression for BJD/Lancet abstracts (refs 6, 20, 24) using U+00B7 middle-dot decimals
+        # Regression for BJD/Lancet abstracts (refs 6, 20, 24) using U+00B7 and U+2219 middle-dot decimals
         abstract = (
             "The mean percentage CFB at week 4 in EASI score was significantly greater "
-            "(P < 0·001) for tofacitinib (-81·7%) vs. vehicle (-29·9%)."
+            "(P < 0·001) for tofacitinib (-81·7%) vs. vehicle (-29·9%), with DLQI 5·41 ± 5∙20."
         )
         nums = rv.extract_abstract_numbers(abstract)
         self.assertIn("-81.7%", nums)
         self.assertIn("-29.9%", nums)
+        self.assertIn("5.41", nums)
+        self.assertIn("5.20", nums)
         self.assertTrue(any("0.001" in n for n in nums), f"Expected p-value 0.001 in {nums}")
         self.assertNotIn("001", nums)
         self.assertTrue(rv.quant_token_in_text("81.7%", abstract))
         self.assertTrue(rv.quant_token_in_text("p < 0.001", abstract))
+        self.assertTrue(rv.quant_token_in_text("5.20", abstract))
 
     def test_spelled_out_hazard_ratio_and_ci_extracted_from_abstract(self) -> None:
         abstract = "Primary outcome (hazard ratio, 0.74; 95% confidence interval [CI], 0.65 to 0.85; P<0.001)."
@@ -699,12 +702,13 @@ class TestDocumentScanning(unittest.TestCase):
             ("document:p197", "3. McMurray JJV et al. Dapagliflozin. N Engl J Med. 2019. doi:10.1056/NEJMoa1911303"),
             ("document:p198", "APPENDIX"),
             ("document:p199", "1. Aged 2 years or older with mild to moderate atopic dermatitis."),
+            ("footer1:p1", "Department of Pharmacology Thesis Protocol 2026"),
         ]
         unlinked = rv.extract_unlinked_bibliography_entries(segments)
         self.assertEqual(len(unlinked), 2)
-        self.assertEqual([u["location"] for u in unlinked], ["document:p195", "document:p196"])
+        self.assertEqual([u.location for u in unlinked], ["document:p195", "document:p196"])
 
-        md = "\n".join(text for _, text in segments)
+        md = "\n".join(text for loc, text in segments if loc.startswith("document:"))
         fake_http = FakeHttpClient(
             [
                 (
@@ -730,10 +734,81 @@ class TestDocumentScanning(unittest.TestCase):
             self.assertEqual(parsed["unlinked_bibliography_count"], 2)
             self.assertEqual(parsed["scan_diagnostics"][0]["code"], "UNLINKED_BIBLIOGRAPHY_ENTRIES")
 
+            buf_text = io.StringIO()
+            with mock.patch.object(rv, "HttpClient", return_value=fake_http), mock.patch("sys.stdout", buf_text):
+                rc_text = rv.main(["scan", str(p), "--no-abstract"])
+            self.assertEqual(rc_text, 0)
+            text_out = buf_text.getvalue()
+            self.assertIn("UNLINKED_BIBLIOGRAPHY_ENTRIES", text_out)
+            self.assertIn("Hint:", text_out)
+            self.assertIn("Ali F, Vyas J", text_out)
+
             buf_strict = io.StringIO()
             with mock.patch.object(rv, "HttpClient", return_value=fake_http), mock.patch("sys.stdout", buf_strict):
                 rc_strict = rv.main(["scan", str(p), "--json", "--strict"])
             self.assertEqual(rc_strict, 1)
+
+    def test_scan_zero_doi_bibliography_and_docx_pptx_part_boundaries(self) -> None:
+        # Zero-DOI plain-text bibliography: text output includes previews/hint and --strict fails
+        plain_md = (
+            "# References\n"
+            "1. Ali F, Vyas J, Finlay AY. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "plain.md"
+            p.write_text(plain_md, encoding="utf-8")
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                rc = rv.main(["scan", str(p)])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("UNLINKED_BIBLIOGRAPHY_ENTRIES", out)
+            self.assertIn("line 2:", out)
+            self.assertIn("Hint:", out)
+            with mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(rv.main(["scan", str(p), "--strict"]), 1)
+
+        # DOCX: References at end of document.xml must NOT leak into footer1.xml
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+            "<w:p><w:r><w:t>References</w:t></w:r></w:p>"
+            "<w:p><w:r><w:t>1. Ali F. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.</w:t></w:r></w:p>"
+            "</w:body></w:document>"
+        )
+        footer_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:p><w:r><w:t>Confidential Thesis Protocol Copyright 2026</w:t></w:r></w:p>"
+            "</w:ftr>"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            dp = Path(td) / "bib.docx"
+            with zipfile.ZipFile(dp, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+                zf.writestr("word/footer1.xml", footer_xml)
+            unlinked_docx = rv.extract_unlinked_bibliography_entries(rv.extract_text_segments(dp))
+            self.assertEqual(len(unlinked_docx), 1)
+            self.assertEqual(unlinked_docx[0].location, "document:p2")
+
+        # PPTX: multi-line References slide detects unlinked line even when another line on the slide has a DOI
+        slide_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+            'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody>'
+            "<a:p><a:r><a:t>References</a:t></a:r></a:p>"
+            "<a:p><a:r><a:t>1. Ali F. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.</a:t></a:r></a:p>"
+            "<a:p><a:r><a:t>2. McMurray JJV. DAPA-HF. N Engl J Med. 2019. doi:10.1056/NEJMoa1911303</a:t></a:r></a:p>"
+            "</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            pp = Path(td) / "deck.pptx"
+            with zipfile.ZipFile(pp, "w") as zf:
+                zf.writestr("ppt/slides/slide1.xml", slide_xml)
+            unlinked_pptx = rv.extract_unlinked_bibliography_entries(rv.extract_text_segments(pp))
+            self.assertEqual(len(unlinked_pptx), 1)
+            self.assertEqual(unlinked_pptx[0].location, "Slide 1")
+            self.assertIn("Ali F.", unlinked_pptx[0].text)
 
 
 class TestBatchCLI(unittest.TestCase):
