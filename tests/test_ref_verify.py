@@ -142,6 +142,45 @@ OTHER_PAPER_PUBMED_XML = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+DAPA_HF_SUBGROUP_PUBMED_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>31535829</PMID>
+      <Article>
+        <Journal>
+          <Title>The New England journal of medicine</Title>
+          <ISOAbbreviation>N Engl J Med</ISOAbbreviation>
+          <JournalIssue>
+            <PubDate><Year>2019</Year><Month>Nov</Month><Day>21</Day></PubDate>
+          </JournalIssue>
+        </Journal>
+        <ArticleTitle>Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction.</ArticleTitle>
+        <Abstract>
+          <AbstractText Label="METHODS">In this phase 3, placebo-controlled trial, we randomly assigned 4744 patients with New York Heart Association class II, III, or IV heart failure and an ejection fraction of 40% or less to receive either dapagliflozin (at a dose of 10 mg once daily) or placebo.</AbstractText>
+          <AbstractText Label="RESULTS">Over a median of 18.2 months, the primary outcome occurred in 386 of 2373 patients (16.3%) in the dapagliflozin group and in 502 of 2371 patients (21.2%) in the placebo group (hazard ratio, 0.74; 95% confidence interval [CI], 0.65 to 0.85; P&lt;0.001). In the prespecified subgroup of patients with diabetes (n=1983), the primary outcome occurred in 20.0% vs 25.5% (hazard ratio, 0.75; 95% CI, 0.63 to 0.90), whereas among patients without diabetes (n=2761), the primary outcome occurred in 13.2% vs 17.7% (hazard ratio, 0.73; 95% CI, 0.60 to 0.88).</AbstractText>
+        </Abstract>
+        <AuthorList>
+          <Author><LastName>McMurray</LastName><ForeName>John J V</ForeName><Initials>JJV</Initials></Author>
+          <Author><LastName>Solomon</LastName><ForeName>Scott D</ForeName><Initials>SD</Initials></Author>
+        </AuthorList>
+        <PublicationTypeList>
+          <PublicationType>Randomized Controlled Trial</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MedlineJournalInfo><MedlineTA>N Engl J Med</MedlineTA></MedlineJournalInfo>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">31535829</ArticleId>
+        <ArticleId IdType="doi">10.1056/NEJMoa1911303</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
 class FakeHttpClient(rv.HttpClient):
     """Deterministic HTTP mock keyed by substring rules."""
 
@@ -401,6 +440,206 @@ class TestClaimValidityPack(unittest.TestCase):
         self.assertTrue(any("0.74" in n for n in nums), f"Expected 0.74 in {nums}")
         self.assertTrue(any("0.65" in n and "0.85" in n for n in nums), f"Expected CI 0.65-0.85 in {nums}")
 
+    def test_cohort_mismatch_without_literal_subgroup_word_and_edge_cases(self) -> None:
+        # Abstract contrasts subgroups (women vs men) without using the word "subgroup"
+        sex_rec = rv.PaperRecord(
+            title="Drug X in Adults with Chronic Inflammatory Disease",
+            abstract=(
+                "METHODS: We enrolled 800 adults with chronic inflammatory disease. "
+                "RESULTS: Overall response was 34.0% vs 28.5% (P=0.04). "
+                "In women, response was 41.2% vs 26.1% (P<0.001), whereas in men it was 28.9% vs 30.2% (P=0.68)."
+            ),
+        )
+        # Wrong sex subgroup (men claimed for women's 41.2%)
+        rep_bad, diags_bad = rv.evaluate_claim("In men, response was 41.2% vs 26.1%.", sex_rec)
+        self.assertEqual(rep_bad.missing_numbers, [])
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_bad])
+
+        # Overall attributed to women-only figure
+        _, diags_overall = rv.evaluate_claim("Overall, response was 41.2% vs 26.1%.", sex_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_overall])
+
+        # Correctly scoped to women -> PASS
+        _, diags_ok = rv.evaluate_claim("In women, response was 41.2% vs 26.1%.", sex_rec)
+        self.assertEqual(diags_ok, [])
+
+        # Age threshold swap (<65 vs >=65)
+        age_rec = rv.PaperRecord(
+            title="Antihypertensive Therapy in Adults with Hypertension",
+            abstract=(
+                "METHODS: We enrolled 1200 adults with hypertension. "
+                "RESULTS: Systolic blood pressure fell by 8.4 mmHg overall. "
+                "In patients aged >=65 years (n=410), systolic blood pressure fell by 14.2 mmHg (P<0.001)."
+            ),
+        )
+        _, diags_age = rv.evaluate_claim("In patients aged <65 years, systolic BP fell by 14.2 mmHg.", age_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_age])
+        _, diags_age_ok = rv.evaluate_claim("In patients aged >=65 years, systolic BP fell by 14.2 mmHg.", age_rec)
+        self.assertEqual(diags_age_ok, [])
+
+        # Whole-paper population restatement is NOT a subgroup; unqualified claim passes cleanly
+        t2d_rec = rv.PaperRecord(
+            title="Empagliflozin, Cardiovascular Outcomes, and Mortality in Type 2 Diabetes",
+            abstract=(
+                "METHODS: We assigned 7020 patients with type 2 diabetes to empagliflozin or placebo. "
+                "RESULTS: In patients with type 2 diabetes, the primary outcome occurred in 10.5% vs 12.1% (HR 0.86)."
+            ),
+        )
+        _, diags_t2d = rv.evaluate_claim(
+            "Empagliflozin reduced the primary outcome (10.5% vs 12.1%, HR 0.86).", t2d_rec
+        )
+        self.assertEqual(diags_t2d, [])
+
+        # "overall survival" is an endpoint, NOT an overall-cohort assertion
+        os_rec = rv.PaperRecord(
+            title="Pembrolizumab in Non-Small-Cell Lung Cancer",
+            abstract=(
+                "RESULTS: Median overall survival was 12.1 months vs 9.4 months (HR 0.78). "
+                "In the subgroup of patients with diabetes, median overall survival was 20.2 months (HR 0.54)."
+            ),
+        )
+        _, diags_os = rv.evaluate_claim(
+            "In the diabetes subgroup, median overall survival was 20.2 months (HR 0.54).", os_rec
+        )
+        self.assertEqual(diags_os, [])
+
+        # Generic word "chronic" must not let "chronic kidney disease" match "chronic heart failure"
+        hf_rec = rv.PaperRecord(
+            title="Treatment of Chronic Heart Failure",
+            abstract="RESULTS: Primary outcome occurred in 16.3% vs 21.2% (HR 0.74, 95% CI 0.65-0.85).",
+        )
+        _, diags_ckd = rv.evaluate_claim(
+            "In patients with chronic kidney disease, primary outcome was 16.3% vs 21.2% (HR 0.74).", hf_rec
+        )
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_ckd])
+
+        # Biomarker threshold subgroup swap (PD-L1 <1% vs PD-L1 >=50%) vs matching claim
+        pdl1_rec = rv.PaperRecord(
+            title="Pembrolizumab in Non-Small-Cell Lung Cancer",
+            abstract=(
+                "RESULTS: In patients with PD-L1 expression >=50%, median overall survival was 20.2 months (HR 0.54), "
+                "whereas in patients with PD-L1 <1%, median overall survival was 10.1 months (HR 0.91)."
+            ),
+        )
+        _, diags_pdl1_bad = rv.evaluate_claim(
+            "In patients with PD-L1 <1%, median overall survival was 20.2 months (HR 0.54).", pdl1_rec
+        )
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_pdl1_bad])
+        _, diags_pdl1_ok = rv.evaluate_claim(
+            "In patients with PD-L1 >=50%, median overall survival was 20.2 months (HR 0.54).", pdl1_rec
+        )
+        self.assertEqual(diags_pdl1_ok, [])
+
+        # Compound "and"-separated subgroups in a single sentence
+        and_rec = rv.PaperRecord(
+            title="Dapagliflozin in Heart Failure with Reduced Ejection Fraction",
+            abstract=(
+                "RESULTS: The hazard ratio was 0.75 (95% CI, 0.63 to 0.90) among patients with diabetes "
+                "and 0.73 (95% CI, 0.60 to 0.88) among patients without diabetes."
+            ),
+        )
+        _, diags_and_bad = rv.evaluate_claim(
+            "Among patients without diabetes, the hazard ratio was 0.75 (95% CI 0.63-0.90).", and_rec
+        )
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_and_bad])
+        _, diags_and_ok = rv.evaluate_claim(
+            "Among patients without diabetes, the hazard ratio was 0.73 (95% CI 0.60-0.88).", and_rec
+        )
+        self.assertEqual(diags_and_ok, [])
+
+    def test_cohort_review_regressions(self) -> None:
+        # 1. Symbol-prefixed age bounds without "aged" ("patients <65 years" vs "patients >=65 years")
+        age_rec = rv.PaperRecord(
+            title="Antihypertensive Therapy in Adults with Hypertension",
+            abstract=(
+                "METHODS: We enrolled 1200 adults with hypertension.\n"
+                "RESULTS: Systolic BP fell by 8.4 mmHg overall. "
+                "In patients >=65 years, systolic BP fell by 14.2 mmHg."
+            ),
+        )
+        _, diags_sym_age = rv.evaluate_claim("In patients <65 years, systolic BP fell by 14.2 mmHg.", age_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_sym_age])
+        _, diags_sym_ok = rv.evaluate_claim("In patients >=65 years, systolic BP fell by 14.2 mmHg.", age_rec)
+        self.assertEqual(diags_sym_ok, [])
+
+        # 2. Named wrong subgroup ("HFrEF subgroup") must NOT bypass via generic "subgroup" keyword
+        dapa_sg = rv.PaperRecord(
+            title="Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction",
+            abstract=(
+                "METHODS: We randomly assigned 4744 patients with heart failure and EF <= 40%.\n"
+                "RESULTS: Primary outcome occurred in 16.3% vs 21.2% (HR 0.74; 95% CI, 0.65 to 0.85). "
+                "In the prespecified subgroup of patients with diabetes (n=1983), HR was 0.75 (95% CI, 0.63 to 0.90)."
+            ),
+        )
+        _, diags_wrong_sg = rv.evaluate_claim("In the HFrEF subgroup, HR was 0.75 (95% CI 0.63-0.90).", dapa_sg)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_wrong_sg])
+
+        # 3. Mixed-cohort claim (subgroup sample size n=1983 + overall HR 0.74) caught by per-token Check 2,
+        # while valid trial N=4,744 + diabetes subgroup HR 0.75 still passes
+        _, diags_mixed = rv.evaluate_claim("In patients with diabetes (n=1983), HR was 0.74.", dapa_sg)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_mixed])
+        _, diags_valid_mixed = rv.evaluate_claim(
+            "In DAPA-HF (N=4,744), among patients with diabetes, HR was 0.75 (95% CI 0.63-0.90).", dapa_sg
+        )
+        self.assertEqual(diags_valid_mixed, [])
+
+        # 4. t2dm vs diabetes polarity conflict ("with diabetes" vs "without type 2 diabetes")
+        _, diags_t2d_pol = rv.evaluate_claim(
+            "In patients without type 2 diabetes, HR was 0.75 (95% CI 0.63-0.90).", dapa_sg
+        )
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_t2d_pol])
+
+        # 5. vs/versus and 3-way comma/and subgroup splitting
+        vs_rec = rv.PaperRecord(
+            title="Biomarker Trial in Solid Tumors",
+            abstract=(
+                "RESULTS: Response was 68.0% in stage II, 45.0% in stage III, and 22.0% in stage IV. "
+                "HR was 0.75 among patients with diabetes vs 0.91 among patients without diabetes."
+            ),
+        )
+        _, diags_stage = rv.evaluate_claim("In stage IV, response was 68.0%.", vs_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_stage])
+        _, diags_vs = rv.evaluate_claim("Among patients without diabetes, HR was 0.75.", vs_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_vs])
+
+        # 6. Unlisted race/class cohorts ("In Asian patients" vs "In Black patients", "NYHA class III/IV")
+        race_rec = rv.PaperRecord(
+            title="Drug Z in Heart Failure",
+            abstract=(
+                "RESULTS: Overall response was 30.0%. "
+                "In Asian patients, response was 52.0%, whereas in Black patients response was 28.0%. "
+                "In NYHA class III/IV, mortality was 19.5%."
+            ),
+        )
+        _, diags_race = rv.evaluate_claim("In Black patients, response was 52.0%.", race_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_race])
+        _, diags_nyha = rv.evaluate_claim("Overall mortality was 19.5%.", race_rec)
+        self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in diags_nyha])
+        _, diags_nyha_ok = rv.evaluate_claim("In NYHA class III/IV, mortality was 19.5%.", race_rec)
+        self.assertEqual(diags_nyha_ok, [])
+
+        # 7. False-positive guards:
+        # (a) Mixed overall + subgroup sentence does NOT flag overall clause as subgroup
+        mixed_sent_rec = rv.PaperRecord(
+            title="Trial of Drug Q",
+            abstract="RESULTS: Overall HR was 0.74; in the diabetes subgroup, HR was 0.75.",
+        )
+        _, diags_overall_ok = rv.evaluate_claim("Overall, HR was 0.74.", mixed_sent_rec)
+        self.assertEqual(diags_overall_ok, [])
+
+        # (b) Multi-sentence METHODS enrollment & outcome count ("42 patients with serious adverse events")
+        multi_methods_rec = rv.PaperRecord(
+            title="Drug M in Chronic Migraine",
+            abstract=(
+                "METHODS: This was a multicenter phase 3 trial. "
+                "Eligible adults with chronic migraine received drug M 10 mg or placebo for 12 weeks.\n"
+                "RESULTS: Monthly migraine days fell by 4.2 days (P<0.001). "
+                "There were 42 patients with serious adverse events (12.1%)."
+            ),
+        )
+        _, diags_ae_ok = rv.evaluate_claim("Serious adverse events occurred in 12.1% of patients.", multi_methods_rec)
+        self.assertEqual(diags_ae_ok, [])
+
 
 class TestEndToEndMockedVerification(unittest.TestCase):
     def test_full_pass_citation(self) -> None:
@@ -433,6 +672,120 @@ class TestEndToEndMockedVerification(unittest.TestCase):
         self.assertIn("STATUS: PASS", txt)
         self.assertIn("CLAIM_CHECK:", txt)
         self.assertIn("OFFICIAL ABSTRACT:", txt)
+
+    def test_correct_doi_correct_number_wrong_cohort_flagged(self) -> None:
+        """Fixture: correct DOI, correct number, wrong cohort (subgroup number misattributed)."""
+        http = FakeHttpClient(
+            [
+                (
+                    "api.crossref.org/works/10.1056/NEJMoa1911303",
+                    rv.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                ),
+                (
+                    "esearch.fcgi",
+                    rv.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
+                ),
+                ("efetch.fcgi?db=pubmed&id=31535829", rv.HttpResponse(200, DAPA_HF_SUBGROUP_PUBMED_XML, "pm")),
+            ]
+        )
+
+        # 1. Subgroup number (20.0% vs 25.5%, HR 0.75, 95% CI 0.63-0.90) attributed to overall population
+        res_overall = rv.verify_citation(
+            rv.CitationInput(
+                doi="10.1056/NEJMoa1911303",
+                author="McMurray",
+                year="2019",
+                journal="NEJM",
+                claim=(
+                    "In DAPA-HF, dapagliflozin reduced the primary outcome in the overall population "
+                    "(20.0% vs 25.5%; HR 0.75, 95% CI 0.63-0.90)."
+                ),
+            ),
+            http,
+        )
+        self.assertEqual(res_overall.status, "WARN")
+        assert res_overall.claim_report is not None
+        self.assertEqual(res_overall.claim_report.missing_numbers, [])
+        diag_overall = next(d for d in res_overall.diagnostics if d.code == "CLAIM_COHORT_MISMATCH")
+        self.assertEqual(diag_overall.severity, "WARNING")
+        self.assertEqual(diag_overall.details["reason"], "subgroup_attributed_to_overall")
+        self.assertIn("HR 0.75", diag_overall.details["matched_numbers"])
+        self.assertIn("diabetes", diag_overall.actual.lower())
+
+        # 2. Subgroup number attributed to opposite subgroup ("without diabetes" / "nondiabetic")
+        for wrong_claim in (
+            "Among patients without diabetes, dapagliflozin reduced the primary outcome (HR 0.75, 95% CI 0.63-0.90).",
+            "In nondiabetic patients, dapagliflozin achieved HR 0.75 (95% CI 0.63-0.90).",
+        ):
+            res_flip = rv.verify_citation(
+                rv.CitationInput(doi="10.1056/NEJMoa1911303", claim=wrong_claim),
+                http,
+            )
+            self.assertEqual(res_flip.status, "WARN", f"Expected WARN for: {wrong_claim}")
+            assert res_flip.claim_report is not None
+            self.assertEqual(res_flip.claim_report.missing_numbers, [])
+            diag_flip = next(d for d in res_flip.diagnostics if d.code == "CLAIM_COHORT_MISMATCH")
+            self.assertEqual(diag_flip.details["reason"], "cohort_conflict")
+
+        # 3. Subgroup number cited without mentioning the subgroup at all (mixed with overall N=4,744)
+        res_omitted = rv.verify_citation(
+            rv.CitationInput(
+                doi="10.1056/NEJMoa1911303",
+                claim="In DAPA-HF (N=4,744), dapagliflozin reduced the primary outcome (20.0% vs 25.5%; HR 0.75, 95% CI 0.63-0.90).",
+            ),
+            http,
+        )
+        self.assertEqual(res_omitted.status, "WARN")
+        assert res_omitted.claim_report is not None
+        self.assertEqual(res_omitted.claim_report.missing_numbers, [])
+        diag_omitted = next(d for d in res_omitted.diagnostics if d.code == "CLAIM_COHORT_MISMATCH")
+        self.assertEqual(diag_omitted.details["reason"], "subgroup_qualifier_omitted")
+
+        # 4. Overall number attributed to a different/absent cohort (CKD, HFpEF, or diabetes subgroup)
+        for wrong_overall_claim in (
+            "In patients with chronic kidney disease, dapagliflozin reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85).",
+            "In patients with HFpEF, dapagliflozin reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85).",
+            "In patients with diabetes, dapagliflozin reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85).",
+        ):
+            res_wrong = rv.verify_citation(
+                rv.CitationInput(doi="10.1056/NEJMoa1911303", claim=wrong_overall_claim),
+                http,
+            )
+            self.assertEqual(res_wrong.status, "WARN", f"Expected WARN for: {wrong_overall_claim}")
+            assert res_wrong.claim_report is not None
+            self.assertEqual(res_wrong.claim_report.missing_numbers, [])
+            self.assertIn("CLAIM_COHORT_MISMATCH", [d.code for d in res_wrong.diagnostics])
+
+        # 5. Controls on the exact same fixture: valid overall, alias (HFrEF), and matching subgroup claims still PASS
+        for valid_claim in (
+            "In DAPA-HF (N=4,744), dapagliflozin 10 mg reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85, p<0.001).",
+            "In patients with HFrEF, dapagliflozin reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85).",
+            "In diabetic patients, dapagliflozin reduced the primary outcome (20.0% vs 25.5%; HR 0.75, 95% CI 0.63-0.90).",
+            "Among patients without diabetes (n=2761), the primary outcome occurred in 13.2% vs 17.7% (HR 0.73, 95% CI 0.60-0.88).",
+        ):
+            res_ok = rv.verify_citation(
+                rv.CitationInput(doi="10.1056/NEJMoa1911303", claim=valid_claim),
+                http,
+            )
+            self.assertEqual(res_ok.status, "PASS", f"Expected PASS for: {valid_claim}; got {res_ok.diagnostics}")
+            self.assertEqual(res_ok.diagnostics, [])
+
+        # 6. CLI --strict treats CLAIM_COHORT_MISMATCH as non-zero exit
+        buf = io.StringIO()
+        with mock.patch.object(rv, "HttpClient", return_value=http), mock.patch("sys.stdout", buf):
+            rc = rv.main(
+                [
+                    "check",
+                    "--doi",
+                    "10.1056/NEJMoa1911303",
+                    "--claim",
+                    "In the overall population, HR was 0.75 (95% CI 0.63-0.90).",
+                    "--strict",
+                    "--no-abstract",
+                ]
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("CLAIM_COHORT_MISMATCH", buf.getvalue())
 
     def test_pmid_doi_conflict(self) -> None:
         http = FakeHttpClient(

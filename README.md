@@ -147,6 +147,7 @@ ref-verify scan review.md --json
 | `ERROR` / `WARNING` | `YEAR_MISMATCH` | Year differs (`WARNING` for ±1-yr epub offset, `ERROR` for ≥2 yrs) | Official `print` and `online` publication years |
 | `ERROR` | `JOURNAL_MISMATCH` | Cited journal diverges from official full/abbreviated name | Official full title + PubMed ISO abbreviation |
 | `WARNING` | `CLAIM_NUMBER_NOT_IN_ABSTRACT` | Quantitative value in `--claim` not found in fetched abstract/OA text | Missing tokens, abstract numbers, matched sentences, and official abstract |
+| `WARNING` | `CLAIM_COHORT_MISMATCH` | Matched number in `--claim` belongs to a subgroup or different cohort in the source text | Claimed cohort vs source subgroup/cohort and exact matched clause |
 | `WARNING` | `UNLINKED_BIBLIOGRAPHY_ENTRIES` | `scan` found bibliography entries under References/Bibliography with no DOI or PMID | Count, locations, previews, and hint to add DOIs/PMIDs or run `batch` |
 | `WARNING` / `INFO` | `EXPRESSION_OF_CONCERN` / `RETRACTION_NOTICE` / `HAS_CORRECTION_NOTICE` | Editorial notice or published erratum | Notice metadata so the author checks whether results changed |
 
