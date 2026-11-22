@@ -1,21 +1,35 @@
 # ref-verify
 
-Zero-dependency Python CLI and AI agent skill for verifying scientific citations and grounding quantitative claims against live **Crossref**, **PubMed (NCBI E-utilities)**, and **Europe PMC** records.
+[![CI](https://github.com/heyiamnotacoder/ref-verify/actions/workflows/ci.yml/badge.svg)](https://github.com/heyiamnotacoder/ref-verify/actions/workflows/ci.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-Built on the Python 3.10+ standard library with zero runtime dependencies.
+**Zero-dependency Python CLI and AI agent skill for verifying scientific citations and grounding quantitative claims against live Crossref, PubMed, and Europe PMC records.**
 
-## What it checks
+LLMs routinely hallucinate DOIs, swap PMIDs, miss retractions, misattribute first authors, or subtly alter hazard ratios and sample sizes. Plain pass/fail linters leave an agent guessing what went wrong. `ref-verify` emits structured, **pinpointing diagnostics** (`Expected`, `Actual`, `Hint`, `Fix`, `TokenDiff`, and `DID_YOU_MEAN` recovery suggestions) alongside the paper's official abstract so an AI agent—or a human author—can fix broken citations in a single pass.
 
-- **Identifier syntax and resolution**: Validates and normalizes DOIs and PMIDs (catching trailing punctuation, missing `10.` prefixes, embedded whitespace, URL junk, and PMCID/PMID mix-ups) and resolves them live against Crossref, PubMed, and Europe PMC.
-- **PMID–DOI conflict detection**: Flags `CRITICAL` mismatches when a cited DOI and PMID resolve to different papers.
-- **Retractions and editorial notices**: Detects retracted publications (`CRITICAL`), expressions of concern (`WARNING`), retraction notices (`WARNING`), and published errata/corrections (`INFO`) across PubMed publication types, `CommentsCorrectionsList`, Crossref `updated-by` / `relation`, and Europe PMC records.
-- **Field-level metadata diffs**: Cross-checks cited title (distinguishing subtitle truncation from a different paper with token-level diffs), first author (distinguishing co-author position from an absent author), print/online publication year (distinguishing ±1-year epub offsets from genuine errors), and journal name/abbreviation (with biomedical alias normalization).
-- **Quantitative claim grounding**: Extracts numbers, percentages, hazard/odds/risk ratios, confidence intervals, p-values, sample sizes, and dosages from a claim, compares them against the official abstract (and Europe PMC Open Access `fullTextXML` when `--fulltext` is passed), and prints the matched sentences alongside the official abstract.
-- **Document scanning**: Extracts and verifies all DOIs and PMIDs directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes).
+```mermaid
+flowchart LR
+    A["Input<br/>DOI · PMID · JSON<br/>.md · .docx · .pptx"] --> B["ref-verify CLI<br/>(Python stdlib only)"]
+    B --> C["Live APIs<br/>Crossref · PubMed · Europe PMC"]
+    C --> D["Pinpointing Diagnostics<br/>Expected · Actual · Hint · Fix"]
+    C --> E["Grounded Claim Check<br/>Numeric Diff + Official Abstract / OA XML"]
+```
 
-## Why pinpointing diagnostics matter for AI agents
+---
 
-A plain pass/fail check forces an AI agent to guess why a citation failed. Every `ref-verify` diagnostic emits structured `Expected`, `Actual`, `Hint`, and `Fix` lines—plus `TokenDiff` on title mismatches, `Cleaned` candidates on malformed DOIs, and ranked `DID_YOU_MEAN` matches when a DOI or PMID is not found—so coding and research agents can repair broken citations and verify quantitative claims in a single pass.
+## Features
+
+- **Identifier validation & live resolution** — Normalizes DOIs and PMIDs (catching trailing punctuation, missing `10.` prefixes, spaces, URL parameters, and PMCID/PMID mix-ups) and cross-resolves them via Crossref, NCBI PubMed E-utilities, and Europe PMC.
+- **PMID–DOI conflict detection** — Flags `CRITICAL` errors when a cited DOI and PMID point to different papers.
+- **Retraction & editorial notice checks** — Detects retracted papers (`CRITICAL`), expressions of concern (`WARNING`), retraction notices (`WARNING`), and errata/corrections (`INFO`).
+- **Field-level metadata diffs** — Checks title (distinguishing subtitle truncation from wrong papers via similarity + token diffs), first author (distinguishing co-author position from absent authors), publication year (distinguishing ±1-year epub-ahead-of-print offsets), and journal name/abbreviation (with biomedical alias normalization).
+- **Quantitative claim grounding** — Extracts numbers, percentages, HR/OR/RR, 95% CIs, p-values, sample sizes, and doses from a claim, diffs them against the official abstract (and Europe PMC Open Access `fullTextXML` with `--fulltext`), and prints the matched sentences plus full abstract.
+- **Document scanning** — Extracts and verifies every DOI and PMID directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes).
+- **Zero runtime dependencies** — Pure Python 3.10+ standard library. Runs anywhere without virtualenvs or compiled wheels.
+
+---
 
 ## Installation
 
@@ -39,17 +53,19 @@ Using `pip`:
 pip install git+https://github.com/heyiamnotacoder/ref-verify.git
 ```
 
-### AI agent skill
+### AI Agent Skill
 
-Install the portable `ref-verify` skill into your coding agent (Claude Code, Codex, Cursor, etc.):
+Install the portable `ref-verify` skill into Claude Code, Codex, Cursor, or any compatible coding agent:
 
 ```bash
 npx skills add heyiamnotacoder/ref-verify
 ```
 
+---
+
 ## Usage
 
-### Verify a single citation and claim
+### 1. Check a single citation and quantitative claim
 
 ```bash
 ref-verify check \
@@ -61,18 +77,39 @@ ref-verify check \
   --claim "Dapagliflozin 10 mg in 4,744 patients reduced the primary outcome (16.3% vs 21.2%; HR 0.74, 95% CI 0.65-0.85, p<0.001)."
 ```
 
-Pass `--fulltext` when a claim cites subgroup or secondary figures not present in the abstract (fetches Europe PMC Open Access XML when a PMCID is available).
+Add `--fulltext` when a claim references subgroup or secondary outcomes that live outside the abstract (fetches Europe PMC Open Access XML whenever a PMCID exists).
 
-### Verify a batch JSON file (or stdin)
+### 2. Batch-verify a bibliography (`JSON` file or `stdin`)
 
-Provide a JSON array of citation objects (`id`, `doi`, `pmid`, `title`, `author`, `year`, `journal`, `claim`, `fulltext`):
+Create a JSON array of citation objects (`id`, `doi`, `pmid`, `title`, `author`, `year`, `journal`, `claim`, `fulltext`):
+
+```json
+[
+  {
+    "id": "dapa-hf",
+    "doi": "10.1056/NEJMoa1911303",
+    "pmid": "31535829",
+    "author": "McMurray",
+    "year": 2019,
+    "journal": "NEJM",
+    "claim": "In 4,744 patients, dapagliflozin reduced the primary outcome (HR 0.74, 95% CI 0.65-0.85, p<0.001)."
+  },
+  {
+    "id": "empa-reg",
+    "doi": "10.1056/NEJMoa1504720",
+    "author": "Zinman",
+    "year": 2015,
+    "fulltext": true
+  }
+]
+```
 
 ```bash
 ref-verify batch refs.json
 cat refs.json | ref-verify batch - --json
 ```
 
-### Scan a manuscript or slide deck
+### 3. Scan a manuscript, Markdown draft, or slide deck
 
 ```bash
 ref-verify scan manuscript.docx
@@ -80,18 +117,40 @@ ref-verify scan journal_club.pptx --no-abstract
 ref-verify scan review.md --json
 ```
 
-### Common flags and exit codes
+### Flags & exit codes
 
-- `--fulltext` — also fetch Europe PMC Open Access `fullTextXML` for claim checks.
-- `--no-abstract` — omit the full official abstract block from text output.
-- `--json` — emit machine-readable JSON output.
-- `--strict` — exit `1` on `WARNING` diagnostics as well as `FAIL`.
-- `--timeout <seconds>` — per-request HTTP timeout (default `15.0`).
-- Exit codes: `0` on pass (or warn without `--strict`), `1` on fail (or warn with `--strict`), `2` on input/file error.
+| Flag | Description |
+| --- | --- |
+| `--fulltext` | Fetch Europe PMC Open Access `fullTextXML` in addition to the abstract. |
+| `--no-abstract` | Omit the full `OFFICIAL ABSTRACT` block from text output. |
+| `--json` | Emit structured JSON for downstream scripts or agents. |
+| `--strict` | Treat `WARNING` diagnostics as failures (exit `1`). |
+| `--timeout <sec>` | Per-request HTTP timeout in seconds (default: `15.0`). |
 
-## Example diagnostic output
+- **Exit `0`**: Pass (or warning without `--strict`).
+- **Exit `1`**: Fail (any `CRITICAL`/`ERROR`, or `WARNING` with `--strict`).
+- **Exit `2`**: Invalid arguments, malformed JSON, or unreadable input file.
 
-Running `ref-verify check` against a citation with trailing DOI punctuation, a co-author cited as first author, a wrong year and journal, and misstated claim numbers:
+---
+
+## Diagnostic Codes
+
+| Severity | Code | What it catches | What `ref-verify` returns to help fix it |
+| --- | --- | --- | --- |
+| `CRITICAL` | `RETRACTED_PAPER` | Paper flagged retracted in PubMed, Crossref, or Europe PMC | Retraction source, date, and notice DOI |
+| `CRITICAL` | `PMID_DOI_CONFLICT` | Cited DOI and PMID resolve to different papers | Both resolved titles/DOIs/PMIDs side by side |
+| `ERROR` | `DOI_SYNTAX_INVALID` / `PMID_SYNTAX_INVALID` | Trailing punctuation, URL junk, missing `10.`, or PMCID in PMID slot | Exact syntax issue + `Cleaned` candidate verified live |
+| `ERROR` | `DOI_NOT_FOUND` / `PMID_NOT_FOUND` | Unresolvable identifier (404 / hallucinated / typo) | Ranked `DID_YOU_MEAN` matches when `--title` is supplied |
+| `ERROR` | `TITLE_MISMATCH` | Cited title diverges from official record | Similarity score + word-level `TokenDiff` |
+| `ERROR` / `WARNING` | `AUTHOR_MISMATCH` | First author does not match (`WARNING` if co-author, `ERROR` if absent) | Actual first author, author position, and full author list |
+| `ERROR` / `WARNING` | `YEAR_MISMATCH` | Year differs (`WARNING` for ±1-yr epub offset, `ERROR` for ≥2 yrs) | Official `print` and `online` publication years |
+| `ERROR` | `JOURNAL_MISMATCH` | Cited journal diverges from official full/abbreviated name | Official full title + PubMed ISO abbreviation |
+| `WARNING` | `CLAIM_NUMBER_NOT_IN_ABSTRACT` | Quantitative value in `--claim` not found in fetched abstract/OA text | Missing tokens, abstract numbers, matched sentences, and official abstract |
+| `WARNING` / `INFO` | `EXPRESSION_OF_CONCERN` / `RETRACTION_NOTICE` / `HAS_CORRECTION_NOTICE` | Editorial notice or published erratum | Notice metadata so the author checks whether results changed |
+
+---
+
+## Example Output
 
 ```bash
 ref-verify check \
@@ -151,13 +210,24 @@ CLAIM_CHECK:
     > RESULTS: Over a median of 18.2 months, the primary outcome occurred in 386 of 2373 patients (16.3%) in the dapagliflozin group and in 502 of 2371 patients (21.2%) in the placebo group (hazard ratio, 0.74; 95% confidence interval [CI], 0.65 to 0.85; P<0.001).
 ```
 
-## Optional NCBI API key
+---
 
-PubMed E-utilities permits 3 requests/second without an API key and 10 requests/second with one. `ref-verify` paces requests automatically and picks up `NCBI_API_KEY` when set:
+## Scope & Limitations
+
+- **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Europe PMC OA full text—never from model memory.
+- **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without a Europe PMC Open Access XML copy, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
+
+---
+
+## Optional NCBI API Key
+
+PubMed E-utilities permits 3 requests/second without an API key and 10 requests/second with one. `ref-verify` paces requests automatically and uses `NCBI_API_KEY` when set:
 
 ```bash
 export NCBI_API_KEY="your-ncbi-api-key"
 ```
+
+---
 
 ## Development
 
@@ -166,6 +236,8 @@ Run the local lint, format, and offline unit test gate:
 ```bash
 ./scripts/check.sh
 ```
+
+---
 
 ## License
 
