@@ -9,8 +9,8 @@ import urllib.parse
 from collections.abc import Sequence
 from typing import Any
 
-from ref_verify.http_client import HttpClient, HttpResponse
-from ref_verify.models import Author, PaperRecord
+from ref_verify.http_client import HttpClient
+from ref_verify.models import Author, HttpResponse, PaperRecord
 from ref_verify.text import strip_tags, title_similarity
 
 CROSSREF_SELECT_FIELDS = (

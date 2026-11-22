@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from ref_verify.cohort import check_claim_cohort
-from ref_verify.http_client import HttpClient
 from ref_verify.models import ClaimReport, Diagnostic, FulltextResult, PaperRecord
 from ref_verify.quant import (
     extract_abstract_numbers,
@@ -14,17 +13,20 @@ from ref_verify.quant import (
     quant_token_in_norm_text,
     split_sentences,
 )
-from ref_verify.sources.fulltext import fetch_oa_fulltext_paragraphs
 from ref_verify.text import normalize_text
 
 
 def evaluate_claim(
     claim: str,
     rec: PaperRecord,
-    http: HttpClient | None = None,
-    fetch_fulltext: bool = False,
-    prefetched_fulltext: FulltextResult | None = None,
+    fulltext_requested: bool = False,
+    fulltext: FulltextResult | None = None,
 ) -> tuple[ClaimReport, list[Diagnostic]]:
+    """Ground ``claim`` against ``rec.abstract`` and, when requested, an already-fetched OA ``fulltext``.
+
+    Pure: the caller fetches full text. ``fulltext_requested`` with no PMCID yields FULLTEXT_UNAVAILABLE;
+    with a PMCID but ``fulltext=None`` the full-text check is skipped.
+    """
     report = ClaimReport(
         claim=claim,
         extracted_numbers=extract_claim_numbers(claim),
@@ -63,8 +65,8 @@ def evaluate_claim(
             split_sentences(rec.abstract), report.extracted_numbers, report.extracted_keywords, max_items=4
         )
 
-    # Optional OA full-text check (NCBI PMC with Europe PMC fallback)
-    if fetch_fulltext and (http is not None or prefetched_fulltext is not None):
+    # Optional OA full-text check (NCBI PMC with Europe PMC fallback, fetched by the caller)
+    if fulltext_requested:
         if not rec.pmcid:
             report.fulltext_status = "unavailable: no PMCID linked to this paper"
             diags.append(
@@ -78,12 +80,8 @@ def evaluate_claim(
                     fix="Verify non-abstract numbers against the publisher PDF.",
                 )
             )
-        else:
-            ft_res = (
-                prefetched_fulltext
-                if prefetched_fulltext is not None
-                else fetch_oa_fulltext_paragraphs(http, rec.pmcid, is_open_access=rec.is_open_access)  # type: ignore[arg-type]
-            )
+        elif fulltext is not None:
+            ft_res = fulltext
             if ft_res.error or not ft_res.paragraphs:
                 err_text = ft_res.error or "empty body"
                 report.fulltext_status = f"unavailable: {err_text}"

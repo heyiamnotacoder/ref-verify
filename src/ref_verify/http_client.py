@@ -12,10 +12,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from dataclasses import dataclass
 from typing import Any
 
 from ref_verify import __version__
+from ref_verify.models import HttpResponse
 
 _MAILTO = os.environ.get("REF_VERIFY_MAILTO", "").strip() or "ref-verify@users.noreply.github.com"
 
@@ -27,14 +27,6 @@ USER_AGENT = (
 
 
 DEFAULT_TIMEOUT = 15.0
-
-
-@dataclass
-class HttpResponse:
-    status: int
-    body: str
-    url: str
-    error: str | None = None
 
 
 def _decompress_body(raw: bytes, content_encoding: str) -> bytes:

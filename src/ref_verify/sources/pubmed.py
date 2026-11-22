@@ -9,8 +9,8 @@ import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from typing import Any
 
-from ref_verify.http_client import HttpClient, HttpResponse
-from ref_verify.models import Author, PaperRecord
+from ref_verify.http_client import HttpClient
+from ref_verify.models import Author, HttpResponse, PaperRecord
 from ref_verify.text import parse_year_int, strip_tags, title_similarity
 
 PUBMED_BATCH_SIZE = 100

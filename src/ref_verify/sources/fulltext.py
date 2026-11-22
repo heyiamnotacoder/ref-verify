@@ -8,8 +8,8 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 
-from ref_verify.http_client import HttpClient, HttpResponse, is_transient_http
-from ref_verify.models import FulltextResult
+from ref_verify.http_client import HttpClient, is_transient_http
+from ref_verify.models import FulltextResult, HttpResponse
 
 PMC_FULLTEXT_BATCH_SIZE = 12
 

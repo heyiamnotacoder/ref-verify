@@ -22,6 +22,16 @@ class Diagnostic:
 
 
 @dataclass
+class HttpResponse:
+    """Outcome of one GET made by ``HttpClient``; ``status == 0`` means a network-level failure."""
+
+    status: int
+    body: str
+    url: str
+    error: str | None = None
+
+
+@dataclass
 class Author:
     family: str
     given: str = ""

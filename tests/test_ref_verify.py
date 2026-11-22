@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import tempfile
@@ -184,7 +185,7 @@ DAPA_HF_SUBGROUP_PUBMED_XML = """<?xml version="1.0" encoding="UTF-8"?>
 class FakeHttpClient(http_client.HttpClient):
     """Deterministic HTTP mock keyed by substring rules."""
 
-    def __init__(self, routes: list[tuple[str, http_client.HttpResponse]]) -> None:
+    def __init__(self, routes: list[tuple[str, models.HttpResponse]]) -> None:
         super().__init__(timeout=5.0, retries=0)
         self.routes = routes
         self.calls: list[str] = []
@@ -196,12 +197,12 @@ class FakeHttpClient(http_client.HttpClient):
         *,
         timeout: float | None = None,
         retries: int | None = None,
-    ) -> http_client.HttpResponse:
+    ) -> models.HttpResponse:
         self.calls.append(url)
         for pattern, resp in self.routes:
             if pattern in url:
                 return resp
-        return http_client.HttpResponse(status=404, body="", url=url, error="HTTP 404 Not Found")
+        return models.HttpResponse(status=404, body="", url=url, error="HTTP 404 Not Found")
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +222,19 @@ class TestPackageMetadata(unittest.TestCase):
                 rv.main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), f"ref-verify {__version__}")
+
+    def test_pure_core_never_imports_network_layer(self) -> None:
+        # CODING_STANDARDS.md "Pure core" + "Layered modules": only higher layers may touch HttpClient/sources.
+        pure = ["models", "lexicons", "text", "identifiers", "identity", "metadata", "quant", "cohort", "claims"]
+        pkg_dir = Path(models.__file__).parent
+        for name in pure:
+            tree = ast.parse((pkg_dir / f"{name}.py").read_text(encoding="utf-8"))
+            imported = {
+                f"{n.module}.{a.name}" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names
+            }
+            imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+            leaks = sorted(m for m in imported if m.startswith(("ref_verify.http_client.", "ref_verify.sources.")))
+            self.assertEqual(leaks, [], f"{name}.py imports the network layer")
 
 
 class TestSyntaxValidation(unittest.TestCase):
@@ -660,13 +674,13 @@ class TestEndToEndMockedVerification(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
             ]
         )
         cit = models.CitationInput(
@@ -692,13 +706,13 @@ class TestEndToEndMockedVerification(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_SUBGROUP_PUBMED_XML, "pm")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_SUBGROUP_PUBMED_XML, "pm")),
             ]
         )
 
@@ -805,13 +819,13 @@ class TestEndToEndMockedVerification(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=26378978", http_client.HttpResponse(200, OTHER_PAPER_PUBMED_XML, "pm")),
+                ("efetch.fcgi?db=pubmed&id=26378978", models.HttpResponse(200, OTHER_PAPER_PUBMED_XML, "pm")),
             ]
         )
         cit = models.CitationInput(doi="10.1056/NEJMoa1911303", pmid="26378978")
@@ -827,12 +841,12 @@ class TestEndToEndMockedVerification(unittest.TestCase):
     def test_retracted_paper_critical(self) -> None:
         http = FakeHttpClient(
             [
-                ("efetch.fcgi?db=pubmed&id=99999991", http_client.HttpResponse(200, RETRACTED_PUBMED_XML, "pm")),
+                ("efetch.fcgi?db=pubmed&id=99999991", models.HttpResponse(200, RETRACTED_PUBMED_XML, "pm")),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
-                ("api.crossref.org/works/", http_client.HttpResponse(404, "", "cr", "HTTP 404 Not Found")),
+                ("api.crossref.org/works/", models.HttpResponse(404, "", "cr", "HTTP 404 Not Found")),
             ]
         )
         res = verify.verify_citation(models.CitationInput(pmid="99999991"), http)
@@ -861,19 +875,19 @@ class TestEndToEndMockedVerification(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/FAKE99999",
-                    http_client.HttpResponse(404, "", "cr", "HTTP 404 Not Found"),
+                    models.HttpResponse(404, "", "cr", "HTTP 404 Not Found"),
                 ),
                 (
                     "api.crossref.org/works?query.title=",
-                    http_client.HttpResponse(200, json.dumps(search_payload), "cr-search"),
+                    models.HttpResponse(200, json.dumps(search_payload), "cr-search"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "pm-search"),
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "pm-search"),
                 ),
             ]
         )
@@ -909,11 +923,11 @@ class TestEndToEndMockedVerification(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
-                ("europepmc/webservices/rest/search", http_client.HttpResponse(200, json.dumps(epmc_json), "epmc")),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
-                ("PMC7654321/fullTextXML", http_client.HttpResponse(200, fulltext_xml, "ft")),
+                ("europepmc/webservices/rest/search", models.HttpResponse(200, json.dumps(epmc_json), "epmc")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("PMC7654321/fullTextXML", models.HttpResponse(200, fulltext_xml, "ft")),
             ]
         )
         cit = models.CitationInput(
@@ -946,15 +960,15 @@ class TestEndToEndMockedVerification(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
-                ("europepmc/webservices/rest/search", http_client.HttpResponse(200, json.dumps(epmc_json), "epmc")),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("europepmc/webservices/rest/search", models.HttpResponse(200, json.dumps(epmc_json), "epmc")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
                 (
                     "PMC9930707/fullTextXML",
-                    http_client.HttpResponse(500, "", "ft-epmc", "HTTP 500 Internal Server Error"),
+                    models.HttpResponse(500, "", "ft-epmc", "HTTP 500 Internal Server Error"),
                 ),
-                ("efetch.fcgi?db=pmc&id=PMC9930707", http_client.HttpResponse(200, ncbi_xml, "ft-ncbi")),
+                ("efetch.fcgi?db=pmc&id=PMC9930707", models.HttpResponse(200, ncbi_xml, "ft-ncbi")),
             ]
         )
         cit = models.CitationInput(
@@ -977,13 +991,14 @@ class TestEndToEndMockedVerification(unittest.TestCase):
         )
         http = FakeHttpClient(
             [
-                ("PMC8074061/fullTextXML", http_client.HttpResponse(0, "", "ft-epmc", "timed out")),
-                ("efetch.fcgi?db=pmc&id=PMC8074061", http_client.HttpResponse(200, restricted_ncbi_xml, "ft-ncbi")),
+                ("PMC8074061/fullTextXML", models.HttpResponse(0, "", "ft-epmc", "timed out")),
+                ("efetch.fcgi?db=pmc&id=PMC8074061", models.HttpResponse(200, restricted_ncbi_xml, "ft-ncbi")),
             ]
         )
         rec = models.PaperRecord(pmcid="PMC8074061", abstract="Short abstract with no percentages.")
+        ft_res = fulltext.fetch_oa_fulltext_paragraphs(http, rec.pmcid, is_open_access=rec.is_open_access)
         rep, diags = claims.evaluate_claim(
-            "Burning occurred in 46.3% of patients.", rec, http=http, fetch_fulltext=True
+            "Burning occurred in 46.3% of patients.", rec, fulltext_requested=True, fulltext=ft_res
         )
         self.assertEqual(rep.missing_numbers, ["46.3%"])
         ft_diag = next(d for d in diags if d.code == "FULLTEXT_UNAVAILABLE")
@@ -1093,13 +1108,13 @@ class TestDocumentScanning(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
-                ("esearch.fcgi", http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+                ("esearch.fcgi", models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
             ]
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1201,13 +1216,13 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
-                ("esearch.fcgi", http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+                ("esearch.fcgi", models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
             ]
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1268,16 +1283,14 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works?filter=",
-                    http_client.HttpResponse(200, json.dumps(cr_batch_payload), "cr-batch"),
+                    models.HttpResponse(200, json.dumps(cr_batch_payload), "cr-batch"),
                 ),
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(
-                        200, json.dumps({"esearchresult": {"idlist": ["31535829", "26378978"]}}), "es"
-                    ),
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829", "26378978"]}}), "es"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=31535829,26378978", http_client.HttpResponse(200, pm_batch_xml, "pm-batch")),
-                ("efetch.fcgi?db=pmc&id=PMC7654321", http_client.HttpResponse(200, pmc_batch_xml, "pmc-batch")),
+                ("efetch.fcgi?db=pubmed&id=31535829,26378978", models.HttpResponse(200, pm_batch_xml, "pm-batch")),
+                ("efetch.fcgi?db=pmc&id=PMC7654321", models.HttpResponse(200, pmc_batch_xml, "pmc-batch")),
             ]
         )
         cits = [
@@ -1314,7 +1327,7 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "efetch.fcgi?db=pmc&id=PMC9999999",
-                    http_client.HttpResponse(
+                    models.HttpResponse(
                         200,
                         "<pmc-articleset><article><front><article-meta/></front></article></pmc-articleset>",
                         "pmc",
@@ -1329,20 +1342,20 @@ class TestBatchCLI(unittest.TestCase):
     def test_batch_falls_back_gracefully_when_batch_endpoint_fails(self) -> None:
         http = FakeHttpClient(
             [
-                ("api.crossref.org/works?filter=", http_client.HttpResponse(500, "", "cr-batch", "HTTP 500")),
+                ("api.crossref.org/works?filter=", models.HttpResponse(500, "", "cr-batch", "HTTP 500")),
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr-1"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr-1"),
                 ),
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1504720",
-                    http_client.HttpResponse(404, "", "cr-2", "HTTP 404 Not Found"),
+                    models.HttpResponse(404, "", "cr-2", "HTTP 404 Not Found"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
-                ("esearch.fcgi", http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+                ("esearch.fcgi", models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
             ]
         )
         cits = [
@@ -1393,17 +1406,17 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/FAKE99999",
-                    http_client.HttpResponse(404, "", "cr", "HTTP 404 Not Found"),
+                    models.HttpResponse(404, "", "cr", "HTTP 404 Not Found"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
             ]
         )
         res = verify.verify_citation(models.CitationInput(doi="10.1056/FAKE99999", year="2020"), http)
@@ -1416,18 +1429,18 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "efetch.fcgi?db=pubmed&id=31535829,26378978",
-                    http_client.HttpResponse(200, "<PubmedArticleSet><broken", "pm"),
+                    models.HttpResponse(200, "<PubmedArticleSet><broken", "pm"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm1")),
-                ("efetch.fcgi?db=pubmed&id=26378978", http_client.HttpResponse(200, OTHER_PAPER_PUBMED_XML, "pm2")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm1")),
+                ("efetch.fcgi?db=pubmed&id=26378978", models.HttpResponse(200, OTHER_PAPER_PUBMED_XML, "pm2")),
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr1"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr1"),
                 ),
-                ("api.crossref.org/works/10.1056/NEJMoa1504720", http_client.HttpResponse(404, "", "cr2", "HTTP 404")),
+                ("api.crossref.org/works/10.1056/NEJMoa1504720", models.HttpResponse(404, "", "cr2", "HTTP 404")),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
             ]
         )
@@ -1444,7 +1457,7 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(
+                    models.HttpResponse(
                         200,
                         json.dumps({"esearchresult": {"count": "99", "idlist": ["31535829", "26378978"]}}),
                         "es",
@@ -1478,15 +1491,15 @@ class TestBatchCLI(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works/10.1056/NEJMoa1911303",
-                    http_client.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
+                    models.HttpResponse(200, json.dumps(DAPA_HF_CROSSREF), "cr"),
                 ),
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": ["31535829"]}}), "es"),
                 ),
-                ("efetch.fcgi?db=pubmed&id=31535829", http_client.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
-                ("europepmc/webservices/rest/search", http_client.HttpResponse(200, json.dumps(epmc_json), "epmc")),
-                ("efetch.fcgi?db=pmc&id=PMC7654321", http_client.HttpResponse(200, ft_xml, "ft")),
+                ("efetch.fcgi?db=pubmed&id=31535829", models.HttpResponse(200, DAPA_HF_PUBMED_XML, "pm")),
+                ("europepmc/webservices/rest/search", models.HttpResponse(200, json.dumps(epmc_json), "epmc")),
+                ("efetch.fcgi?db=pmc&id=PMC7654321", models.HttpResponse(200, ft_xml, "ft")),
             ]
         )
         res = verify.verify_citation(
@@ -1565,11 +1578,9 @@ class TestBatchCLI(unittest.TestCase):
         client = http_client.HttpClient(timeout=12.0, retries=2)
         seen: list[tuple[float, int]] = []
 
-        def fake_impl(
-            url: str, headers: dict[str, str] | None, timeout: float, retries: int
-        ) -> http_client.HttpResponse:
+        def fake_impl(url: str, headers: dict[str, str] | None, timeout: float, retries: int) -> models.HttpResponse:
             seen.append((timeout, retries))
-            return http_client.HttpResponse(200, "{}", url)
+            return models.HttpResponse(200, "{}", url)
 
         with mock.patch.object(client, "_get_impl", side_effect=fake_impl):
             client.get_fallback("https://example.org/a", primary_failed_transient=False)
@@ -1584,17 +1595,17 @@ class TestBatchPipeline(unittest.TestCase):
             [
                 (
                     "api.crossref.org/works?",
-                    http_client.HttpResponse(
+                    models.HttpResponse(
                         200, json.dumps({"message": {"items": [DAPA_HF_CROSSREF["message"]]}}), "cr-batch"
                     ),
                 ),
                 (
                     "esearch.fcgi",
-                    http_client.HttpResponse(200, json.dumps({"esearchresult": {"count": "0", "idlist": []}}), "es"),
+                    models.HttpResponse(200, json.dumps({"esearchresult": {"count": "0", "idlist": []}}), "es"),
                 ),
                 (
                     "europepmc/webservices/rest/search",
-                    http_client.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
+                    models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
             ]
         )

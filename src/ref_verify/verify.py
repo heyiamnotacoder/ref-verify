@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ref_verify.claims import evaluate_claim
-from ref_verify.http_client import HttpClient, HttpResponse, is_transient_http
+from ref_verify.http_client import HttpClient, is_transient_http
 from ref_verify.identifiers import clean_identifiers
 from ref_verify.identity import (
     doi_lookup_down,
@@ -25,6 +25,7 @@ from ref_verify.models import (
     ClaimReport,
     Diagnostic,
     FulltextResult,
+    HttpResponse,
     PaperRecord,
     VerificationResult,
 )
@@ -347,12 +348,10 @@ def verify_citation(
             and resolved.pmcid.strip().upper() != eager_ft_pmcid
         ):
             prefetched_ft = None
+        if prefetched_ft is None and cit.fulltext and resolved.pmcid:
+            prefetched_ft = fetch_oa_fulltext_paragraphs(http, resolved.pmcid, is_open_access=resolved.is_open_access)
         claim_report, c_diags = evaluate_claim(
-            cit.claim,
-            resolved,
-            http=http,
-            fetch_fulltext=cit.fulltext,
-            prefetched_fulltext=prefetched_ft,
+            cit.claim, resolved, fulltext_requested=cit.fulltext, fulltext=prefetched_ft
         )
         diagnostics.extend(c_diags)
 

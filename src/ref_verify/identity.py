@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from ref_verify.http_client import HttpResponse
-from ref_verify.models import Diagnostic, PaperRecord
+from ref_verify.models import Diagnostic, HttpResponse, PaperRecord
 from ref_verify.text import title_similarity
 
 Candidates = Sequence[dict[str, Any]]

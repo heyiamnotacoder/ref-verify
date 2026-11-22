@@ -7,8 +7,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ref_verify.http_client import HttpClient, HttpResponse
-from ref_verify.models import CitationInput, FulltextResult, PaperRecord
+from ref_verify.http_client import HttpClient
+from ref_verify.models import CitationInput, FulltextResult, HttpResponse, PaperRecord
 from ref_verify.sources.crossref import fetch_crossref_doi, fetch_crossref_dois_batch
 from ref_verify.sources.europepmc import fetch_epmc_batch
 from ref_verify.sources.fulltext import fetch_oa_fulltext_batch
