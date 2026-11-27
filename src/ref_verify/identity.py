@@ -30,16 +30,22 @@ def did_you_mean_fix(top: dict[str, Any], *, with_pmid: bool) -> str:
     )
 
 
-def no_identifier_diagnostic(title: str | None, did_you_mean: Candidates) -> Diagnostic:
+def no_identifier_diagnostic(
+    title: str | None, did_you_mean: Candidates, *, matched_by_search: bool = False
+) -> Diagnostic:
+    """``matched_by_search``: the citation cited no identifier, so a confident title/author/year match was tried."""
     if title:
+        message = (
+            "No DOI or PMID cited; searched Crossref/PubMed by title, but no single paper matched the cited title, "
+            "first author, and year."
+            if matched_by_search
+            else "No valid DOI or PMID provided; searched Crossref/PubMed by title for suggestions."
+        )
         return Diagnostic(
             code="NO_IDENTIFIER_PROVIDED",
             severity="WARNING",
-            message=(
-                "No valid DOI or PMID provided; searched Crossref/PubMed by title, but no single paper matched "
-                "the cited title, first author, and year."
-            ),
-            expected="A valid DOI/PMID, or a cited title + first author/year that identify one indexed paper",
+            message=message,
+            expected="A valid DOI/PMID, or a cited title + first author + year that identify one indexed paper",
             actual=f'title="{title}"',
             details={"did_you_mean": list(did_you_mean)},
             hint="The reference may be misquoted, not indexed (book, report, website), or fabricated.",
@@ -53,6 +59,20 @@ def no_identifier_diagnostic(title: str | None, did_you_mean: Candidates) -> Dia
         actual="empty citation input",
         hint="Nothing to look up.",
         fix="Provide --doi and/or --pmid (plus optional --title, --author, --year, --journal, --claim).",
+    )
+
+
+def title_search_down_diagnostic(title: str, did_you_mean: Candidates) -> Diagnostic:
+    """ERROR: a citation without identifiers could not be searched, so its existence is unknown (fail-closed)."""
+    return Diagnostic(
+        code="LOOKUP_ERROR",
+        severity="ERROR",
+        message="No DOI or PMID cited, and the Crossref/PubMed title search failed, so the paper could not be found.",
+        expected="HTTP 200 from both Crossref and PubMed title search",
+        actual=f'title="{title}"',
+        details={"did_you_mean": list(did_you_mean)},
+        hint="Transient network failure, rate limit, firewall block, or timeout; this is not evidence the paper is missing.",
+        fix="Check network connectivity and retry with a larger --timeout.",
     )
 
 

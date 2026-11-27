@@ -1223,6 +1223,10 @@ class TestDocumentScanning(unittest.TestCase):
                     models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
                 ("esearch.fcgi", models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+                (  # title searches answer with no hits (a 404 here would read as an outage)
+                    "api.crossref.org/works?query",
+                    models.HttpResponse(200, json.dumps({"message": {"items": []}}), "cr-search"),
+                ),
             ]
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1238,7 +1242,9 @@ class TestDocumentScanning(unittest.TestCase):
             self.assertEqual((parsed["searched_by_title_count"], parsed["resolved_by_search_count"]), (2, 0))
             self.assertEqual(parsed["unlinked_bibliography_count"], 1)
             self.assertEqual(parsed["scan_diagnostics"][0]["code"], "UNLINKED_BIBLIOGRAPHY_ENTRIES")
-            searched_codes = [[d["code"] for d in r["diagnostics"]] for r in parsed["results"][1:]]
+            # Rows follow the reference list: the two searched entries come before the DOI entry.
+            self.assertEqual([r["input"]["location"] for r in parsed["results"]], ["line 4", "line 5", "line 7"])
+            searched_codes = [[d["code"] for d in r["diagnostics"]] for r in parsed["results"][:2]]
             self.assertEqual(searched_codes, [["NO_IDENTIFIER_PROVIDED"], ["NO_IDENTIFIER_PROVIDED"]])
 
             buf_text = io.StringIO()

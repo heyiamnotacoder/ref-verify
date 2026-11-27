@@ -490,6 +490,32 @@ def split_searchable_entries(entries: Sequence[UnlinkedEntry]) -> tuple[list[Cit
     return searchable, unsearchable
 
 
+def merge_in_document_order(
+    segments: Sequence[tuple[str, str]], cited: Sequence[CitationInput], searched: Sequence[CitationInput]
+) -> list[CitationInput]:
+    """Slot each searched reference into ``cited`` at its place in the reference list.
+
+    ``cited`` keeps its own order; a searched entry goes before the first cited reference entry that follows it.
+    Citations not tied to a reference entry (identifiers in body text) are never compared against.
+    """
+    position = {
+        (entry.location, entry.text): (entry.lines[0].segment, entry.lines[0].start)
+        for entry in bibliography_entries(document_lines(segments))
+    }
+
+    def pos(cit: CitationInput) -> tuple[int, int] | None:
+        return position.get((cit.location or "", cit.reference_text or ""))
+
+    pending = sorted(searched, key=lambda c: pos(c) or (len(segments), 0))
+    merged: list[CitationInput] = []
+    for cit in cited:
+        here = pos(cit)
+        while pending and here is not None and (pos(pending[0]) or here) < here:
+            merged.append(pending.pop(0))
+        merged.append(cit)
+    return merged + pending
+
+
 def build_unlinked_bibliography_diagnostic(entries: Sequence[UnlinkedEntry]) -> Diagnostic | None:
     if not entries:
         return None

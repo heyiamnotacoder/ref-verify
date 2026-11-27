@@ -33,6 +33,7 @@ from ref_verify.scan import (
     extract_citations_from_segments,
     extract_text_segments,
     extract_unlinked_bibliography_entries,
+    merge_in_document_order,
     split_searchable_entries,
 )
 from ref_verify.table import ASCII_SYMBOLS, UNICODE_SYMBOLS, Symbols, format_checklist_table
@@ -185,7 +186,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         with HttpClient(timeout=args.timeout) as http:
             # Found identifiers must exist before citing sentences are keyed to their papers.
             resolve_citations(searched, http, args.workers)
-            citations += searched
+            citations = merge_in_document_order(segments, citations, searched)
             attach_citing_sentences(segments, citations)
             for cit in citations:
                 cit.fulltext = args.fulltext

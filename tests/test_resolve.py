@@ -109,6 +109,26 @@ class TestPickingAConfidentMatch(unittest.TestCase):
     def test_title_alone_is_not_enough(self) -> None:
         self.assertIsNone(resolve.pick_confident_match(_cited(author=None, year=None), [_candidate()]))
 
+    def test_first_author_and_year_are_both_required(self) -> None:
+        self.assertIsNone(resolve.pick_confident_match(_cited(author=None), [_candidate()]))
+        self.assertIsNone(resolve.pick_confident_match(_cited(year=None), [_candidate()]))
+        self.assertIsNone(resolve.pick_confident_match(_cited(), [_candidate(year=None)]))
+
+    def test_a_retracted_original_is_matched_so_its_retraction_is_reported(self) -> None:
+        retracted = _candidate(title=f"RETRACTED: {DAPA_TITLE}", title_similarity=0.93)
+        match = resolve.pick_confident_match(_cited(), resolve.rank_candidates([retracted]))
+        assert match is not None
+        self.assertEqual(match["doi"], "10.1056/NEJMoa1911303")
+        for notice in (f"Retraction: {DAPA_TITLE}", f"Retraction Note: {DAPA_TITLE}", f"{DAPA_TITLE}. Reply"):
+            with self.subTest(notice):
+                self.assertTrue(resolve.is_notice_title(notice))
+        self.assertFalse(resolve.is_notice_title(f"RETRACTED: {DAPA_TITLE}"))
+
+    def test_distinct_pubmed_records_sharing_a_title_stay_separate(self) -> None:
+        a = _candidate(source="pubmed", doi=None, pmid="111", first_author="Zinman B")
+        b = _candidate(source="pubmed", doi=None, pmid="222", first_author="McMurray JJV")
+        self.assertEqual(len(resolve.rank_candidates([a, b])), 2)
+
     def test_a_title_cited_without_its_subtitle_needs_author_and_year(self) -> None:
         full = _candidate(
             title="Counting the Burden: Atopic Dermatitis and Health-related Quality of Life",
@@ -132,9 +152,9 @@ class TestPickingAConfidentMatch(unittest.TestCase):
         assert match is not None
         self.assertEqual(match["doi"], "10.1056/NEJMoa1911303")
 
-    def test_an_authorless_letter_with_the_same_title_loses_to_the_paper(self) -> None:
-        letter = _candidate(doi="10.1056/NEJMc1917241", first_author=None, year=2020, journal=None)
-        match = resolve.pick_confident_match(_cited(author=None), [letter, _candidate()])
+    def test_next_years_letter_by_the_same_authors_loses_to_the_paper(self) -> None:
+        letter = _candidate(doi="10.1056/NEJMc1917241", year=2020)  # Crossref lists it under the bare title
+        match = resolve.pick_confident_match(_cited(), [letter, _candidate()])
         assert match is not None
         self.assertEqual(match["doi"], "10.1056/NEJMoa1911303")
 
@@ -187,11 +207,25 @@ class TestResolvingCitations(unittest.TestCase):
         self.assertEqual([d.code for d in res.diagnostics], ["NO_IDENTIFIER_PROVIDED"])
         self.assertEqual(res.did_you_mean[0]["doi"], "10.1056/NEJMoa1911303")
 
+    def test_a_search_outage_is_a_lookup_error_not_a_missing_paper(self) -> None:
+        down = models.HttpResponse(0, "", "cr-search", "timed out")
+        http = FakeHttpClient(
+            [("api.crossref.org/works?query", down)] + _search_routes(crossref_items=[], pubmed_ids=[])
+        )
+        res = verify.verify_citation(_cited(), http)
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual([d.code for d in res.diagnostics], ["LOOKUP_ERROR"])
+        self.assertIsNotNone(res.input.resolution)
+        assert res.input.resolution is not None
+        self.assertTrue(res.input.resolution.lookup_failed)
+
     def test_a_malformed_cited_identifier_is_never_replaced_by_search(self) -> None:
         http = _dapa_found_http()
         res = verify.verify_citation(_cited(doi="10.bad"), http)
         self.assertIn("DOI_SYNTAX_INVALID", [d.code for d in res.diagnostics])
         self.assertNotIn("IDENTIFIER_RESOLVED_BY_SEARCH", [d.code for d in res.diagnostics])
+        (no_id,) = [d for d in res.diagnostics if d.code == "NO_IDENTIFIER_PROVIDED"]
+        self.assertNotIn("first author", no_id.message)  # no match was attempted, so none is claimed
 
     def test_batch_resolves_before_prefetching(self) -> None:
         http = _dapa_found_http()
@@ -218,6 +252,21 @@ class TestScanningReferencesWithoutIdentifiers(unittest.TestCase):
         self.assertEqual((cit.title, cit.author, cit.year), (DAPA_TITLE, "McMurray JJV", "2019"))
         self.assertEqual((cit.location, cit.reference_text), ("line 3", DAPA_NO_ID_REF))
         self.assertEqual([u.location for u in unlinked], ["line 4"])
+
+    def test_searched_entries_keep_their_place_in_the_reference_list(self) -> None:
+        segments = [
+            ("line 1", "## References"),
+            (
+                "line 2",
+                "1. Zinman B. Empagliflozin outcomes in diabetes. N Engl J Med. 2015. doi:10.1056/NEJMoa1504720",
+            ),
+            ("line 3", DAPA_NO_ID_REF),
+            ("line 4", "3. Packer M. Empagliflozin in heart failure. N Engl J Med. 2020. doi:10.1056/NEJMoa2022190"),
+        ]
+        cited = scan.extract_citations_from_segments(segments)
+        searched, _ = scan.split_searchable_entries(scan.extract_unlinked_bibliography_entries(segments))
+        merged = scan.merge_in_document_order(segments, cited, searched)
+        self.assertEqual([c.location for c in merged], ["line 2", "line 3", "line 4"])
 
     def test_scan_verifies_a_vancouver_list_without_dois(self) -> None:
         md = (

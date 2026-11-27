@@ -1,8 +1,8 @@
 """Find the DOI/PMID of a citation that cites neither, by searching Crossref and PubMed.
 
 A candidate is accepted only when the evidence names one paper: a near-identical title (not a reply or notice
-about it), no contradiction from the cited first author or year, and at least one of them positively confirmed. Anything weaker stays a
-"did you mean" suggestion, because verifying the wrong paper would surface as false mismatches.
+about it), the cited first author, and the cited year within one. Anything weaker stays a "did you mean"
+suggestion, because verifying the wrong paper would surface as false mismatches.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from ref_verify.metadata import check_author, check_journal
 from ref_verify.models import Author, CitationInput, PaperRecord, SearchResolution
 from ref_verify.sources.crossref import search_crossref_by_title
 from ref_verify.sources.pubmed import search_pubmed_by_title
-from ref_verify.text import normalize_text, parse_year_int, title_similarity
+from ref_verify.text import parse_year_int, title_similarity
 
 Candidate = dict[str, Any]
 
@@ -28,15 +28,18 @@ DID_YOU_MEAN_LIMIT = 3
 # A letter, reply, or notice *about* a paper often repeats its title (and authors): "<title>. Reply",
 # "Correction to: <title>". Crossref may list such a record under the bare title, so every source's title counts.
 _NOTICE_TITLE_RE = re.compile(
-    r"(?:^|[.:]\s*)(?:in\s+|authors?['’]?\s+)?(?:reply|response|comment(?:ary)?|correction|erratum|corrigendum|"
-    r"retraction(?:\s+note)?|retracted|expression\s+of\s+concern|withdrawn)\b",
+    r"(?:^|[.:]\s*)(?:in\s+|authors?['’]?\s+|notice\s+of\s+)?(?:reply|response|comment(?:ary)?|correction|"
+    r"erratum|corrigendum|retraction(?:\s+note)?|expression\s+of\s+concern)\b",
     flags=re.IGNORECASE,
 )
+# The retracted or withdrawn paper itself keeps its record, retitled "RETRACTED: <title>": that *is* the cited
+# paper (and the retraction check must see it), so the prefix is dropped before comparing titles.
+_STATUS_PREFIX_RE = re.compile(r"^\s*\[?\s*(?:retracted|withdrawn)\s*[\]:.]\s*", flags=re.IGNORECASE)
 
 
 def is_notice_title(title: str) -> bool:
-    """True for titles of replies, comments, corrections, retractions, and similar notices about another paper."""
-    return bool(_NOTICE_TITLE_RE.search(title.strip()))
+    """True for titles of replies, comments, corrections, retraction notices, and similar notes on another paper."""
+    return bool(_NOTICE_TITLE_RE.search(_STATUS_PREFIX_RE.sub("", title).strip()))
 
 
 def needs_resolution(cit: CitationInput) -> bool:
@@ -45,10 +48,11 @@ def needs_resolution(cit: CitationInput) -> bool:
 
 
 def rank_candidates(candidates: Sequence[Candidate]) -> list[Candidate]:
-    """Merge Crossref/PubMed hits for the same DOI, then rank by title similarity, author, citations, PMID."""
+    """Merge Crossref/PubMed hits for the same DOI (or PMID), then rank by title similarity, author, citations."""
     merged_by_key: dict[str, Candidate] = {}
-    for c in candidates:
-        key = (c.get("doi") or "").lower() or normalize_text(c.get("title") or "").lower()
+    for i, c in enumerate(candidates):
+        # Never by title: two distinct papers sharing a title must not borrow each other's author or year.
+        key = (c.get("doi") or "").lower() or (f"pmid:{c['pmid']}" if c.get("pmid") else f"unkeyed:{i}")
         existing = merged_by_key.get(key)
         if existing is None:
             existing = merged_by_key[key] = dict(c)
@@ -74,12 +78,20 @@ def _fill_missing(into: Candidate, other: Candidate) -> None:
     into["notice"] = bool(into.get("notice") or other.get("notice"))
 
 
-def search_candidates(http: HttpClient, title: str, author: str | None = None) -> list[Candidate]:
-    """Every Crossref and PubMed title-search hit, merged and ranked (best first)."""
+def search_candidates(http: HttpClient, title: str, author: str | None = None) -> tuple[list[Candidate], bool]:
+    """(every Crossref and PubMed title-search hit, merged and ranked best first; whether both sources answered)."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         f_cr = pool.submit(search_crossref_by_title, http, title, author, 8)
         f_pm = pool.submit(search_pubmed_by_title, http, title, 5)
-        return rank_candidates(f_cr.result() + f_pm.result())
+        (cr_hits, cr_ok), (pm_hits, pm_ok) = f_cr.result(), f_pm.result()
+    return rank_candidates(cr_hits + pm_hits), cr_ok and pm_ok
+
+
+def did_you_mean(http: HttpClient, title: str | None, author: str | None = None) -> list[Candidate]:
+    """The top few candidates for a cited title, to suggest when an identifier is missing or broken."""
+    if not title:
+        return []
+    return search_candidates(http, title, author)[0][:DID_YOU_MEAN_LIMIT]
 
 
 def _candidate_author(name: str) -> Author:
@@ -92,6 +104,7 @@ def _candidate_author(name: str) -> Author:
 
 def _title_evidence(cited: str, official: str) -> str | None:
     """ "full" for a near-identical title, "main" when the cited title is the official one minus its subtitle."""
+    official = _STATUS_PREFIX_RE.sub("", official)
     if title_similarity(cited, official) >= MIN_TITLE_SIMILARITY:
         return "full"
     main = official.split(":", 1)[0]
@@ -100,39 +113,26 @@ def _title_evidence(cited: str, official: str) -> str | None:
     return None
 
 
-def _confirmations(cit: CitationInput, cand: Candidate) -> int | None:
-    """Score how well the cited author, year, and journal confirm ``cand``; None if anything contradicts it.
+def _match_score(cit: CitationInput, cand: Candidate) -> int | None:
+    """How strongly ``cand`` fits the cited fields, or None unless title, first author, and year all agree.
 
-    An exact year scores above a one-year (print vs online) offset, so a paper beats next year's letter about it.
+    An exact year scores above a one-year (print vs online) offset, so a paper beats next year's letter about it;
+    a matching journal only breaks ties, because abbreviations vary too much to reject on.
     """
-    evidence = _title_evidence(cit.title or "", str(cand.get("title") or ""))
-    if evidence is None:
+    if _title_evidence(cit.title or "", str(cand.get("title") or "")) is None:
         return None
     if cand.get("notice") and not is_notice_title(cit.title or ""):
         return None
-    score = 0
-    author_ok = year_ok = False
-    if cit.author:
-        name = cand.get("first_author")
-        if not name or check_author(cit.author, [_candidate_author(str(name))]) is not None:
-            return None  # a cited author that the candidate cannot confirm is not the same paper
-        author_ok = True
-        score += 1
-    cited_year = parse_year_int(cit.year)
-    cand_year = parse_year_int(cand.get("year"))
-    if cited_year is not None and cand_year is not None:
-        gap = abs(cited_year - cand_year)
-        if gap > MAX_YEAR_GAP:
-            return None
-        year_ok = True
-        score += 2 if gap == 0 else 1
-    # Title alone is not enough (generic titles recur); a main title without its subtitle needs both fields.
-    confirmed = (author_ok and year_ok) if evidence == "main" else (author_ok or year_ok)
-    if not confirmed:
+    name = cand.get("first_author")
+    if not cit.author or not name or check_author(cit.author, [_candidate_author(str(name))]) is not None:
         return None
+    cited_year, cand_year = parse_year_int(cit.year), parse_year_int(cand.get("year"))
+    if cited_year is None or cand_year is None or abs(cited_year - cand_year) > MAX_YEAR_GAP:
+        return None
+    score = 1 + (2 if cited_year == cand_year else 1)
     if cit.journal and cand.get("journal"):
         if check_journal(cit.journal, PaperRecord(journal_full=str(cand["journal"]))) is None:
-            score += 1  # journals only break ties: abbreviations vary too much to reject on
+            score += 1
     return score
 
 
@@ -148,7 +148,7 @@ def _same_paper(a: Candidate, b: Candidate) -> bool:
 
 def pick_confident_match(cit: CitationInput, candidates: Sequence[Candidate]) -> Candidate | None:
     """The one paper the cited fields identify, or None when no candidate (or more than one) fits."""
-    scored = [(score, c) for c in candidates if (score := _confirmations(cit, c)) is not None]
+    scored = [(score, c) for c in candidates if (score := _match_score(cit, c)) is not None]
     if not scored:
         return None
     best = max(score for score, _ in scored)
@@ -166,9 +166,11 @@ def resolve_citation(cit: CitationInput, http: HttpClient) -> None:
     if not needs_resolution(cit):
         return
     assert cit.title is not None
-    candidates = search_candidates(http, cit.title, cit.author)
+    candidates, answered = search_candidates(http, cit.title, cit.author)
     match = pick_confident_match(cit, candidates)
-    cit.resolution = SearchResolution(candidates=candidates[:DID_YOU_MEAN_LIMIT], match=match)
+    cit.resolution = SearchResolution(
+        candidates=candidates[:DID_YOU_MEAN_LIMIT], match=match, lookup_failed=not answered
+    )
     if match is not None:
         cit.doi = match.get("doi")
         cit.pmid = match.get("pmid")

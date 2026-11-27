@@ -209,18 +209,19 @@ def fetch_crossref_dois_batch(
 
 def search_crossref_by_title(
     http: HttpClient, title: str, author: str | None = None, rows: int = 8
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
+    """(candidates, whether Crossref answered): an outage must not read as "no such paper"."""
     params = {"query.title": title, "rows": str(rows), "select": CROSSREF_SELECT_FIELDS}
     if author:
         params["query.author"] = author
     url = f"https://api.crossref.org/works?{urllib.parse.urlencode(params)}"
     resp = http.get(url, headers={"Accept": "application/json"})
     if resp.status != 200:
-        return []
+        return [], False
     try:
         items = json.loads(resp.body).get("message", {}).get("items", [])
     except json.JSONDecodeError:
-        return []
+        return [], False
 
     out: list[dict[str, Any]] = []
     for item in items:
@@ -245,4 +246,4 @@ def search_crossref_by_title(
                 "cited_by_count": cited_by_int,
             }
         )
-    return out
+    return out, True

@@ -114,6 +114,7 @@ class SearchResolution:
 
     candidates: list[dict[str, Any]] = field(default_factory=list)  # ranked "did you mean" papers (top few)
     match: dict[str, Any] | None = None  # the one candidate confidently identified as the cited paper
+    lookup_failed: bool = False  # Crossref or PubMed did not answer, so "no match" proves nothing
 
 
 @dataclass

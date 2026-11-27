@@ -20,6 +20,7 @@ from ref_verify.identity import (
     pmid_lookup_down,
     pmid_not_found_diagnostic,
     resolved_by_search_diagnostic,
+    title_search_down_diagnostic,
 )
 from ref_verify.metadata import check_metadata, merge_records
 from ref_verify.models import (
@@ -35,19 +36,14 @@ from ref_verify.models import (
     status_for,
 )
 from ref_verify.prefetch import PrefetchCache, needs_epmc_for_doi, needs_epmc_for_pmid, prefetch_batch
-from ref_verify.resolve import DID_YOU_MEAN_LIMIT, resolve_citation, resolve_citations, search_candidates
+from ref_verify.resolve import did_you_mean as search_did_you_mean
+from ref_verify.resolve import resolve_citation, resolve_citations
 from ref_verify.sources.crossref import fetch_crossref_doi
 from ref_verify.sources.europepmc import fetch_epmc
 from ref_verify.sources.fulltext import fetch_oa_fulltext_paragraphs
 from ref_verify.sources.pubmed import fetch_pubmed_pmid, pubmed_esearch_by_doi
 
 DEFAULT_WORKERS = 8
-
-
-def _search_did_you_mean(http: HttpClient, title: str | None, author: str | None = None) -> list[dict[str, Any]]:
-    if not title:
-        return []
-    return search_candidates(http, title, author)[:DID_YOU_MEAN_LIMIT]
 
 
 def verify_citation(
@@ -64,10 +60,17 @@ def verify_citation(
     did_you_mean: list[dict[str, Any]] = []
 
     if not clean_doi and not clean_pmid:
-        if cit.resolution is not None:
-            did_you_mean = list(cit.resolution.candidates)
-        elif cit.title:  # a malformed identifier was cited: suggest papers, but never substitute one
-            did_you_mean = _search_did_you_mean(http, cit.title, author=cit.author)
+        searched = cit.resolution
+        if searched is not None:
+            did_you_mean = list(searched.candidates)
+            diagnostics.append(
+                title_search_down_diagnostic(cit.title or "", did_you_mean)
+                if searched.lookup_failed
+                else no_identifier_diagnostic(cit.title, did_you_mean, matched_by_search=True)
+            )
+            return _result(cit, diagnostics, did_you_mean=did_you_mean)
+        if cit.title:  # a malformed identifier was cited: suggest papers, but never substitute one
+            did_you_mean = search_did_you_mean(http, cit.title, author=cit.author)
         if cit.title or not diagnostics:
             diagnostics.append(no_identifier_diagnostic(cit.title, did_you_mean))
         return _result(cit, diagnostics, did_you_mean=did_you_mean)
@@ -224,7 +227,7 @@ def verify_citation(
                     f_ep = pool.submit(
                         fetch_epmc, http, clean_doi, None, fallback=True, primary_failed_transient=cr_transient
                     )
-                    f_dym = pool.submit(_search_did_you_mean, http, cit.title, cit.author)
+                    f_dym = pool.submit(search_did_you_mean, http, cit.title, cit.author)
                     epmc_doi_rec, epmc_doi_resp = f_ep.result()
                     if epmc_doi_rec is None:
                         did_you_mean = f_dym.result()
@@ -261,7 +264,7 @@ def verify_citation(
         pmid_missing and not pmid_lookup_down(pm_resp)
     )
     if genuine_miss and cit.title and not did_you_mean:
-        did_you_mean = _search_did_you_mean(http, cit.title, author=cit.author)
+        did_you_mean = search_did_you_mean(http, cit.title, author=cit.author)
     if doi_missing and clean_doi:
         diagnostics.append(doi_not_found_diagnostic(clean_doi, cr_resp, epmc_doi_resp, did_you_mean))
     if pmid_missing and clean_pmid:
