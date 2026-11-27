@@ -26,7 +26,8 @@ flowchart LR
 - **Retraction & editorial notice checks** — Detects retracted papers (`CRITICAL`), expressions of concern (`WARNING`), retraction notices (`WARNING`), and errata/corrections (`INFO`).
 - **Field-level metadata diffs** — Checks title (distinguishing subtitle truncation from wrong papers via similarity + token diffs), first author (distinguishing co-author position from absent authors), publication year (distinguishing ±1-year epub-ahead-of-print offsets), and journal name/abbreviation (with biomedical alias normalization).
 - **Quantitative claim grounding** — Extracts numbers, percentages, HR/OR/RR, 95% CIs, p-values, sample sizes, and doses from a claim, diffs them against the official abstract (and Open Access JATS full-text XML from NCBI PMC with Europe PMC fallback when `--fulltext` is passed), and prints the matched sentences plus full abstract.
-- **Document scanning** — Extracts and verifies every DOI and PMID directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes).
+- **Document scanning** — Extracts and verifies every DOI and PMID directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes). For entries under a References/Bibliography heading (or numbered entries), it also parses the cited title, first author, year, and journal from Vancouver/NLM or APA text so those fields are cross-checked too; ambiguous entries are left unparsed rather than guessed.
+- **Human-readable checklist** — `batch` and `scan` end with a one-row-per-citation table of ✓ / ⚠ / ✗ / — marks for every check, followed by a "what to fix" list; `--html report.html` writes the same checklist as a self-contained page with clickable DOIs and expandable details.
 - **Zero runtime dependencies** — Pure Python 3.10+ standard library. Runs anywhere without virtualenvs or compiled wheels.
 
 ---
@@ -115,7 +116,37 @@ cat refs.json | ref-verify batch - --json
 ref-verify scan manuscript.docx
 ref-verify scan journal_club.pptx --no-abstract
 ref-verify scan review.md --json
+ref-verify scan thesis.docx --no-abstract --html thesis-references.html
 ```
+
+### 4. Read the checklist
+
+Human-readable `batch` and `scan` output ends with a checklist: one row per citation, one column per check.
+
+```text
+CITATION CHECKLIST  (6 references: 1 pass, 1 warn, 3 fail, 1 unverified)
+#  Where    Reference                    DOI/PMID  Retraction  Title  Author  Year  Journal  Claim  Result
+----------------------------------------------------------------------------------------------------------
+1  line 5   McMurray 2019, 10.1056/N...     ✓          ✓         ✓      ✓      ✓       ✓       —    PASS
+2  line 6   Zinman 2015, 10.1056/NEJ...     ✓          ✓         ✓      ✓      ⚠       ✓       —    WARN
+3  line 7   Packer 2020, 10.1056/NEJ...     ✓          ✓         ✓      ✓      ✓       ✗       —    FAIL
+4  line 8   Wakefield 1998, 10.1016/...     ✓          ✗         ✓      ✓      ✓       ✓       —    FAIL
+5  line 9   10.1136/bmj.n99999999           ✗          —         —      —      —       —       —    FAIL
+6  line 10  6. Ali F, Vyas J, Finlay...     ⚠          —         —      —      —       —       —    UNVERIFIED
+----------------------------------------------------------------------------------------------------------
+✓ pass   ⚠ warning   ✗ fail   i note   — not checked (no cited value to compare)
+
+WHAT TO FIX:
+  [2] line 6 | Zinman 2015, 10.1056/NEJMoa1504720
+      ⚠ Year: YEAR_MISMATCH: Cited year 2016 differs by ±1 year from official dates (published_print=2015 / published_online=2015).
+        Fix: Update citation year to 2015 to match the official record.
+  ...
+```
+
+- **—** means the check did not run (for example, no cited year was given, or the official record has no journal). A ✓ always means the value was compared and matched.
+- **UNVERIFIED** rows are bibliography entries with no DOI or PMID; add an identifier or verify them with `batch`.
+- Ticks fall back to ASCII (`ok ! X -`) when the terminal encoding cannot show them; colour is used only on a TTY and honours `NO_COLOR`.
+- `--html <path>` writes the same checklist as a standalone page (no external assets) with summary counts, a "Needs attention" filter, clickable DOI/PubMed links, and per-row details (cited-as text, official record, and every diagnostic with its fix).
 
 ### Flags & exit codes
 
@@ -127,6 +158,7 @@ ref-verify scan review.md --json
 | `--strict` | Treat `WARNING` diagnostics as failures (exit `1`). |
 | `--timeout <sec>` | Per-request HTTP timeout in seconds (default: `15.0`). |
 | `--workers <n>` | Max concurrent verification workers for `batch` and `scan` (default: `8`; use `1` for sequential). |
+| `--html <path>` | Also write a self-contained HTML checklist report for `batch` and `scan` (works alongside `--json`). |
 
 - **Exit `0`**: Pass (or warning without `--strict`).
 - **Exit `1`**: Fail (any `CRITICAL`/`ERROR`, or `WARNING` with `--strict`).

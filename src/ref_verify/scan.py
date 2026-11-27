@@ -5,10 +5,12 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from ref_verify.identifiers import DOI_CORE_RE, strip_unbalanced_closing
 from ref_verify.models import CitationInput, Diagnostic, UnlinkedEntry
+from ref_verify.refparse import parse_reference
 from ref_verify.text import truncate
 
 SCAN_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s<>\"'{}|\\^\[\]`]+)")
@@ -105,67 +107,6 @@ def extract_text_segments(path: Path) -> list[tuple[str, str]]:
     return [(f"line {i}", line) for i, line in enumerate(raw.splitlines(), start=1) if line.strip()]
 
 
-def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
-    """Extract deduplicated DOIs and PMIDs from text segments, pairing co-located DOI+PMID pairs."""
-    extracted: list[CitationInput] = []
-    seen_dois: set[str] = set()
-    seen_pmids: set[str] = set()
-
-    for loc, text in segments:
-        dois_found: list[tuple[int, str]] = []
-        for m in SCAN_DOI_RE.finditer(text):
-            cleaned, _ = strip_unbalanced_closing(m.group(1))
-            if cleaned and DOI_CORE_RE.match(cleaned):
-                dois_found.append((m.start(), cleaned))
-
-        pmids_found: list[tuple[int, str]] = []
-        for m in SCAN_PMID_RE.finditer(text):
-            pid = m.group(1) or m.group(2)
-            if pid:
-                pmids_found.append((m.start(), pid))
-
-        # Pair a DOI and PMID if they appear near each other (within 160 chars) in the same segment
-        used_pmid_idxs: set[int] = set()
-        for d_pos, doi in dois_found:
-            d_key = doi.lower()
-            paired_pmid: str | None = None
-            for idx, (p_pos, pmid) in enumerate(pmids_found):
-                if idx in used_pmid_idxs:
-                    continue
-                if abs(p_pos - d_pos) <= 160:
-                    paired_pmid = pmid
-                    used_pmid_idxs.add(idx)
-                    break
-
-            if d_key in seen_dois and (not paired_pmid or paired_pmid in seen_pmids):
-                continue
-            seen_dois.add(d_key)
-            if paired_pmid:
-                seen_pmids.add(paired_pmid)
-            extracted.append(
-                CitationInput(
-                    doi=doi,
-                    pmid=paired_pmid,
-                    location=loc,
-                    label=f"{loc} ({doi}" + (f", PMID:{paired_pmid})" if paired_pmid else ")"),
-                )
-            )
-
-        for idx, (_, pmid) in enumerate(pmids_found):
-            if idx in used_pmid_idxs or pmid in seen_pmids:
-                continue
-            seen_pmids.add(pmid)
-            extracted.append(
-                CitationInput(
-                    pmid=pmid,
-                    location=loc,
-                    label=f"{loc} (PMID:{pmid})",
-                )
-            )
-
-    return extracted
-
-
 BIBLIOGRAPHY_HEADING_RE = re.compile(
     r"^(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*\.?\s+)?(?:references|bibliography|works\s+cited|literature\s+cited)\s*:?$",
     flags=re.IGNORECASE,
@@ -209,38 +150,144 @@ def _segment_part_key(loc: str) -> str:
     return "body"
 
 
-def extract_unlinked_bibliography_entries(segments: Sequence[tuple[str, str]]) -> list[UnlinkedEntry]:
-    """Find bibliography entries under a References/Bibliography heading that contain no DOI or PMID."""
-    unlinked: list[UnlinkedEntry] = []
+@dataclass(frozen=True)
+class DocLine:
+    """One non-blank line of a segment: its span in the segment text and whether it sits under References."""
+
+    segment: int
+    location: str
+    start: int
+    end: int
+    text: str  # stripped
+    in_bibliography: bool
+
+
+def iter_document_lines(segments: Sequence[tuple[str, str]]) -> list[DocLine]:
+    """Walk every line once, tracking whether it sits under a References/Bibliography heading."""
+    lines: list[DocLine] = []
     in_bib = False
     prev_part: str | None = None
-
-    for loc, text in segments:
+    for seg_idx, (loc, text) in enumerate(segments):
         part = _segment_part_key(loc)
         if prev_part is not None and part != prev_part:
             in_bib = False
         prev_part = part
-
-        for raw_line in text.splitlines():
-            stripped = raw_line.strip()
+        for m in re.finditer(r"[^\r\n]+", text):
+            stripped = m.group(0).strip()
             if not stripped:
                 continue
+            entry = False
             if BIBLIOGRAPHY_HEADING_RE.match(stripped):
                 in_bib = True
-                continue
-            if not in_bib:
-                continue
-            if _is_bibliography_section_end(stripped):
+            elif in_bib and _is_bibliography_section_end(stripped):
                 in_bib = False
-                continue
-            if SCAN_DOI_RE.search(stripped) or SCAN_PMID_RE.search(stripped):
-                continue
-            looks_like_entry = (NUMBERED_ENTRY_RE.match(stripped) and len(stripped) >= 15) or (
-                YEAR_OR_URL_RE.search(stripped) and len(stripped) >= 20
-            )
-            if looks_like_entry:
-                unlinked.append(UnlinkedEntry(location=loc, text=stripped))
+            else:
+                entry = in_bib
+            lines.append(DocLine(seg_idx, loc, m.start(), m.end(), stripped, entry))
+    return lines
 
+
+def _citation_label(loc: str, doi: str | None, pmid: str | None) -> str:
+    if doi:
+        return f"{loc} ({doi}" + (f", PMID:{pmid})" if pmid else ")")
+    return f"{loc} (PMID:{pmid})"
+
+
+def _attach_cited_fields(cit: CitationInput, line: DocLine | None) -> None:
+    """Fill cited title/author/year/journal from the first bibliography entry carrying this identifier.
+
+    Body-text mentions stay identifier-only; when the bibliography entry comes later, the citation is
+    re-pointed at that entry so "Where" shows the reference the author actually wrote.
+    """
+    if cit.reference_text is not None or line is None:
+        return
+    if not (line.in_bibliography or NUMBERED_ENTRY_RE.match(line.text)):
+        return
+    ref = parse_reference(line.text)
+    cit.title, cit.author, cit.year, cit.journal = ref.title, ref.author, ref.year, ref.journal
+    cit.reference_text = line.text
+    cit.location = line.location
+    cit.label = _citation_label(line.location, cit.doi, cit.pmid)
+
+
+def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
+    """Extract deduplicated DOIs and PMIDs from text segments, pairing co-located DOI+PMID pairs."""
+    extracted: list[CitationInput] = []
+    by_doi: dict[str, CitationInput] = {}
+    by_pmid: dict[str, CitationInput] = {}
+    lines_by_segment: dict[int, list[DocLine]] = {}
+    for line in iter_document_lines(segments):
+        lines_by_segment.setdefault(line.segment, []).append(line)
+
+    for seg_idx, (loc, text) in enumerate(segments):
+        seg_lines = lines_by_segment.get(seg_idx, [])
+
+        def line_at(pos: int, seg_lines: list[DocLine] = seg_lines) -> DocLine | None:
+            return next((ln for ln in seg_lines if ln.start <= pos < ln.end), None)
+
+        dois_found: list[tuple[int, str]] = []
+        for m in SCAN_DOI_RE.finditer(text):
+            cleaned, _ = strip_unbalanced_closing(m.group(1))
+            if cleaned and DOI_CORE_RE.match(cleaned):
+                dois_found.append((m.start(), cleaned))
+
+        pmids_found: list[tuple[int, str]] = []
+        for m in SCAN_PMID_RE.finditer(text):
+            pid = m.group(1) or m.group(2)
+            if pid:
+                pmids_found.append((m.start(), pid))
+
+        # Pair a DOI and PMID if they appear near each other (within 160 chars) in the same segment
+        used_pmid_idxs: set[int] = set()
+        for d_pos, doi in dois_found:
+            d_key = doi.lower()
+            paired_pmid: str | None = None
+            for idx, (p_pos, pmid) in enumerate(pmids_found):
+                if idx in used_pmid_idxs:
+                    continue
+                if abs(p_pos - d_pos) <= 160:
+                    paired_pmid = pmid
+                    used_pmid_idxs.add(idx)
+                    break
+
+            if d_key in by_doi and (not paired_pmid or paired_pmid in by_pmid):
+                _attach_cited_fields(by_doi[d_key], line_at(d_pos))
+                continue
+            cit = CitationInput(doi=doi, pmid=paired_pmid, location=loc, label=_citation_label(loc, doi, paired_pmid))
+            by_doi[d_key] = cit
+            if paired_pmid:
+                by_pmid[paired_pmid] = cit
+            _attach_cited_fields(cit, line_at(d_pos))
+            extracted.append(cit)
+
+        for idx, (p_pos, pmid) in enumerate(pmids_found):
+            if idx in used_pmid_idxs:
+                continue
+            if pmid in by_pmid:
+                _attach_cited_fields(by_pmid[pmid], line_at(p_pos))
+                continue
+            cit = CitationInput(pmid=pmid, location=loc, label=_citation_label(loc, None, pmid))
+            by_pmid[pmid] = cit
+            _attach_cited_fields(cit, line_at(p_pos))
+            extracted.append(cit)
+
+    return extracted
+
+
+def extract_unlinked_bibliography_entries(segments: Sequence[tuple[str, str]]) -> list[UnlinkedEntry]:
+    """Find bibliography entries under a References/Bibliography heading that contain no DOI or PMID."""
+    unlinked: list[UnlinkedEntry] = []
+    for line in iter_document_lines(segments):
+        if not line.in_bibliography:
+            continue
+        stripped = line.text
+        if SCAN_DOI_RE.search(stripped) or SCAN_PMID_RE.search(stripped):
+            continue
+        looks_like_entry = (NUMBERED_ENTRY_RE.match(stripped) and len(stripped) >= 15) or (
+            YEAR_OR_URL_RE.search(stripped) and len(stripped) >= 20
+        )
+        if looks_like_entry:
+            unlinked.append(UnlinkedEntry(location=line.location, text=stripped))
     return unlinked
 
 

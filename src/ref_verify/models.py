@@ -102,6 +102,7 @@ class CitationInput:
     label: str | None = None
     location: str | None = None
     fulltext: bool = False
+    reference_text: str | None = None  # bibliography line `scan` parsed the cited fields from
 
 
 @dataclass
