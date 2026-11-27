@@ -250,35 +250,37 @@ def pubmed_esearch_by_dois_batch(http: HttpClient, dois: Sequence[str]) -> tuple
     return list(dict.fromkeys(pmids)), checked
 
 
-def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> list[dict[str, Any]]:
+def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> tuple[list[dict[str, Any]], bool]:
+    """(candidates, whether PubMed answered): an outage must not read as "no such paper"."""
     # Clean special chars that break PubMed boolean queries
     clean_q = re.sub(r"[\[\]():\"']", " ", title)
     clean_q = re.sub(r"\s+", " ", clean_q).strip()
     if not clean_q:
-        return []
+        return [], True
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(
-        {"db": "pubmed", "term": f"{clean_q}[Title]", "retmode": "json", "retmax": str(retmax)}
+        # Relevance, not PubMed's default newest-first: a landmark trial must not lose to later papers on it.
+        {"db": "pubmed", "term": f"{clean_q}[Title]", "retmode": "json", "retmax": str(retmax), "sort": "relevance"}
     )
     resp = http.get(url)
     if resp.status != 200:
-        return []
+        return [], False
     try:
         ids = json.loads(resp.body).get("esearchresult", {}).get("idlist", [])
     except json.JSONDecodeError:
-        return []
+        return [], False
     if not ids:
-        return []
+        return [], True
 
     sum_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + urllib.parse.urlencode(
         {"db": "pubmed", "id": ",".join(ids), "retmode": "json"}
     )
     sresp = http.get(sum_url)
     if sresp.status != 200:
-        return []
+        return [], False
     try:
         sdata = json.loads(sresp.body).get("result", {})
     except json.JSONDecodeError:
-        return []
+        return [], False
 
     out: list[dict[str, Any]] = []
     for pid in ids:
@@ -307,4 +309,4 @@ def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> lis
                 "title_similarity": round(title_similarity(title, t), 3),
             }
         )
-    return out
+    return out, True

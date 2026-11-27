@@ -1199,14 +1199,17 @@ class TestDocumentScanning(unittest.TestCase):
                 "1. Ali F, Vyas J, Finlay AY. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.",
             ),
             ("document:p196", "2. Kramer ON et al. The history of atopic dermatitis. Clin Dermatol. 2017;35(4):344-8."),
+            ("document:p196a", "4. National Institute for Health Research. Annual report. London: NIHR; 2018."),
             ("document:p197", "3. McMurray JJV et al. Dapagliflozin. N Engl J Med. 2019. doi:10.1056/NEJMoa1911303"),
             ("document:p198", "APPENDIX"),
             ("document:p199", "1. Aged 2 years or older with mild to moderate atopic dermatitis."),
             ("footer1:p1", "Department of Pharmacology Thesis Protocol 2026"),
         ]
         unlinked = scan.extract_unlinked_bibliography_entries(segments)
-        self.assertEqual(len(unlinked), 2)
-        self.assertEqual([u.location for u in unlinked], ["document:p195", "document:p196"])
+        self.assertEqual([u.location for u in unlinked], ["document:p195", "document:p196", "document:p196a"])
+        searchable, unsearchable = scan.split_searchable_entries(unlinked)
+        self.assertEqual([c.location for c in searchable], ["document:p195", "document:p196"])
+        self.assertEqual([u.location for u in unsearchable], ["document:p196a"])
 
         md = "\n".join(text for loc, text in segments if loc.startswith("document:"))
         fake_http = FakeHttpClient(
@@ -1220,6 +1223,10 @@ class TestDocumentScanning(unittest.TestCase):
                     models.HttpResponse(200, json.dumps({"resultList": {"result": []}}), "epmc"),
                 ),
                 ("esearch.fcgi", models.HttpResponse(200, json.dumps({"esearchresult": {"idlist": []}}), "es")),
+                (  # title searches answer with no hits (a 404 here would read as an outage)
+                    "api.crossref.org/works?query",
+                    models.HttpResponse(200, json.dumps({"message": {"items": []}}), "cr-search"),
+                ),
             ]
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1230,9 +1237,15 @@ class TestDocumentScanning(unittest.TestCase):
                 rc = rv.main(["scan", str(p), "--json"])
             self.assertEqual(rc, 0)
             parsed = json.loads(buf.getvalue())
-            self.assertEqual(parsed["extracted_count"], 1)
-            self.assertEqual(parsed["unlinked_bibliography_count"], 2)
+            # Both parseable entries were searched; neither matched, so they are WARN rows with no identifier.
+            self.assertEqual(parsed["extracted_count"], 3)
+            self.assertEqual((parsed["searched_by_title_count"], parsed["resolved_by_search_count"]), (2, 0))
+            self.assertEqual(parsed["unlinked_bibliography_count"], 1)
             self.assertEqual(parsed["scan_diagnostics"][0]["code"], "UNLINKED_BIBLIOGRAPHY_ENTRIES")
+            # Rows follow the reference list: the two searched entries come before the DOI entry.
+            self.assertEqual([r["input"]["location"] for r in parsed["results"]], ["line 4", "line 5", "line 7"])
+            searched_codes = [[d["code"] for d in r["diagnostics"]] for r in parsed["results"][:2]]
+            self.assertEqual(searched_codes, [["NO_IDENTIFIER_PROVIDED"], ["NO_IDENTIFIER_PROVIDED"]])
 
             buf_text = io.StringIO()
             with mock.patch.object(rv, "HttpClient", return_value=fake_http), mock.patch("sys.stdout", buf_text):
@@ -1249,11 +1262,9 @@ class TestDocumentScanning(unittest.TestCase):
             self.assertEqual(rc_strict, 1)
 
     def test_scan_zero_doi_bibliography_and_docx_pptx_part_boundaries(self) -> None:
-        # Zero-DOI plain-text bibliography: text output includes previews/hint and --strict fails
-        plain_md = (
-            "# References\n"
-            "1. Ali F, Vyas J, Finlay AY. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.\n"
-        )
+        # Zero-DOI bibliography whose entry cannot be searched (no author/title split): no network, the
+        # text output includes previews/hint, and --strict fails
+        plain_md = "# References\n1. World Health Organization. Global report on diabetes. Geneva: WHO; 2016.\n"
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "plain.md"
             p.write_text(plain_md, encoding="utf-8")

@@ -12,6 +12,7 @@ Run `./scripts/check.sh` after any code or test change; it executes the exact li
   - `quant.py`, `cohort.py`, `claims.py` — pure claim grounding (numbers, cohorts, evaluation).
   - `grounding.py` — pure per-sentence grounding and co-citation reconciliation of citing sentences.
   - `http_client.py` — the only network boundary; `sources/{crossref,pubmed,europepmc,fulltext}.py` pair pure parsers with thin fetchers.
+  - `resolve.py` — finds the DOI/PMID of a citation that cites neither (Crossref/PubMed title search + strict confident-match rules).
   - `prefetch.py`, `verify.py` — batch prefetch pipeline and per-citation orchestration.
   - `scan.py` — document extraction (identifiers, parsed bibliography fields, superscript citation markers).
   - `citing.py` — pure discovery of the body sentences citing each reference (numeric, author-year, inline ID).
@@ -21,4 +22,5 @@ Run `./scripts/check.sh` after any code or test change; it executes the exact li
 - `tests/test_ref_verify.py` — offline unit test suite using `FakeHttpClient`.
 - `tests/test_human_report.py` — offline tests for reference parsing, checklist rows, and both renderers.
 - `tests/test_citing_claims.py` — offline tests for citing-sentence discovery, grounding, and reconciliation.
+- `tests/test_resolve.py` — offline tests for finding identifiers by search (match rules, verify/batch/scan wiring).
 - `skills/ref-verify/SKILL.md` — portable agent skill definition installed via `npx skills add`; keep free of local paths and synced with CLI flags/diagnostics.

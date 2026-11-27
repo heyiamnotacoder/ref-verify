@@ -19,6 +19,8 @@ from ref_verify.identity import (
     no_identifier_diagnostic,
     pmid_lookup_down,
     pmid_not_found_diagnostic,
+    resolved_by_search_diagnostic,
+    title_search_down_diagnostic,
 )
 from ref_verify.metadata import check_metadata, merge_records
 from ref_verify.models import (
@@ -34,54 +36,14 @@ from ref_verify.models import (
     status_for,
 )
 from ref_verify.prefetch import PrefetchCache, needs_epmc_for_doi, needs_epmc_for_pmid, prefetch_batch
-from ref_verify.sources.crossref import fetch_crossref_doi, search_crossref_by_title
+from ref_verify.resolve import did_you_mean as search_did_you_mean
+from ref_verify.resolve import resolve_citation, resolve_citations
+from ref_verify.sources.crossref import fetch_crossref_doi
 from ref_verify.sources.europepmc import fetch_epmc
 from ref_verify.sources.fulltext import fetch_oa_fulltext_paragraphs
-from ref_verify.sources.pubmed import (
-    fetch_pubmed_pmid,
-    pubmed_esearch_by_doi,
-    search_pubmed_by_title,
-)
-from ref_verify.text import normalize_text
+from ref_verify.sources.pubmed import fetch_pubmed_pmid, pubmed_esearch_by_doi
 
 DEFAULT_WORKERS = 8
-
-
-def _search_did_you_mean(http: HttpClient, title: str | None, author: str | None = None) -> list[dict[str, Any]]:
-    if not title:
-        return []
-    candidates: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        f_cr = pool.submit(search_crossref_by_title, http, title, author, 8)
-        f_pm = pool.submit(search_pubmed_by_title, http, title, 5)
-        candidates.extend(f_cr.result())
-        candidates.extend(f_pm.result())
-
-    # Merge duplicates by DOI (combining PubMed PMID + Crossref citation count when both return the same paper)
-    merged_by_key: dict[str, dict[str, Any]] = {}
-    for c in candidates:
-        key = (c.get("doi") or "").lower() or normalize_text(c.get("title") or "").lower()
-        existing = merged_by_key.get(key)
-        if existing is None:
-            merged_by_key[key] = dict(c)
-        else:
-            existing["pmid"] = existing.get("pmid") or c.get("pmid")
-            existing["doi"] = existing.get("doi") or c.get("doi")
-            existing["first_author"] = existing.get("first_author") or c.get("first_author")
-            existing["year"] = existing.get("year") or c.get("year")
-            existing["journal"] = existing.get("journal") or c.get("journal")
-            existing["title_similarity"] = max(existing.get("title_similarity", 0), c.get("title_similarity", 0))
-            existing["cited_by_count"] = max(existing.get("cited_by_count", 0), c.get("cited_by_count", 0))
-
-    def _rank_key(x: dict[str, Any]) -> tuple[float, int, int, int]:
-        sim_bucket = round(float(x.get("title_similarity", 0)), 2)
-        has_author = 1 if x.get("first_author") else 0
-        cited_by = int(x.get("cited_by_count", 0) or 0)
-        has_pmid = 1 if x.get("pmid") else 0
-        return (sim_bucket, has_author, cited_by, has_pmid)
-
-    ranked = sorted(merged_by_key.values(), key=_rank_key, reverse=True)
-    return ranked[:3]
 
 
 def verify_citation(
@@ -89,14 +51,26 @@ def verify_citation(
     http: HttpClient,
     prefetched: PrefetchCache | None = None,
 ) -> VerificationResult:
+    resolve_citation(cit, http)  # no-op unless the citation names no identifier at all
     clean_doi, clean_pmid, diagnostics = clean_identifiers(cit)
+    if cit.resolution is not None and cit.resolution.match is not None:
+        diagnostics.append(resolved_by_search_diagnostic(cit.resolution.match))
     if cit.duplicate_locations:
         diagnostics.append(duplicate_reference_diagnostic(cit))
     did_you_mean: list[dict[str, Any]] = []
 
     if not clean_doi and not clean_pmid:
-        if cit.title:
-            did_you_mean = _search_did_you_mean(http, cit.title, author=cit.author)
+        searched = cit.resolution
+        if searched is not None:
+            did_you_mean = list(searched.candidates)
+            diagnostics.append(
+                title_search_down_diagnostic(cit.title or "", did_you_mean)
+                if searched.lookup_failed
+                else no_identifier_diagnostic(cit.title, did_you_mean, matched_by_search=True)
+            )
+            return _result(cit, diagnostics, did_you_mean=did_you_mean)
+        if cit.title:  # a malformed identifier was cited: suggest papers, but never substitute one
+            did_you_mean = search_did_you_mean(http, cit.title, author=cit.author)
         if cit.title or not diagnostics:
             diagnostics.append(no_identifier_diagnostic(cit.title, did_you_mean))
         return _result(cit, diagnostics, did_you_mean=did_you_mean)
@@ -253,7 +227,7 @@ def verify_citation(
                     f_ep = pool.submit(
                         fetch_epmc, http, clean_doi, None, fallback=True, primary_failed_transient=cr_transient
                     )
-                    f_dym = pool.submit(_search_did_you_mean, http, cit.title, cit.author)
+                    f_dym = pool.submit(search_did_you_mean, http, cit.title, cit.author)
                     epmc_doi_rec, epmc_doi_resp = f_ep.result()
                     if epmc_doi_rec is None:
                         did_you_mean = f_dym.result()
@@ -290,7 +264,7 @@ def verify_citation(
         pmid_missing and not pmid_lookup_down(pm_resp)
     )
     if genuine_miss and cit.title and not did_you_mean:
-        did_you_mean = _search_did_you_mean(http, cit.title, author=cit.author)
+        did_you_mean = search_did_you_mean(http, cit.title, author=cit.author)
     if doi_missing and clean_doi:
         diagnostics.append(doi_not_found_diagnostic(clean_doi, cr_resp, epmc_doi_resp, did_you_mean))
     if pmid_missing and clean_pmid:
@@ -403,7 +377,10 @@ def verify_citations_batch(
     if len(citations) == 1:
         return reconcile_sentence_checks([verify_citation(citations[0], http)])
 
-    # Phase 0: Local syntax pre-validation to collect unique DOIs and PMIDs
+    # Phase 0: find identifiers for citations that cite none, so the found papers join the batch prefetch.
+    resolve_citations(citations, http, workers)
+
+    # Phase 1: Local syntax pre-validation to collect unique DOIs and PMIDs
     parsed_ids: list[tuple[str | None, str | None, bool]] = []
     unique_dois: list[str] = []
     seen_dois: set[str] = set()
@@ -425,8 +402,8 @@ def verify_citations_batch(
         return reconcile_sentence_checks([verify_citation(cit, http, prefetched=cache) for cit in citations])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(citations))) as pool:
-        # Citations with no usable identifier never read the prefetch cache, so their title
-        # searches start now and overlap the whole prefetch instead of waiting behind it.
+        # Citations still without a usable identifier never read the prefetch cache (a malformed one
+        # triggers a title search), so they start now and overlap the whole prefetch.
         early = {
             i: pool.submit(verify_citation, cit, http)
             for i, (cit, (c_doi, c_pmid, _)) in enumerate(zip(citations, parsed_ids))

@@ -109,6 +109,15 @@ def citation_key(doi: str | None, pmid: str | None) -> str:
 
 
 @dataclass
+class SearchResolution:
+    """Outcome of searching Crossref/PubMed for a citation that cites no DOI or PMID."""
+
+    candidates: list[dict[str, Any]] = field(default_factory=list)  # ranked "did you mean" papers (top few)
+    match: dict[str, Any] | None = None  # the one candidate confidently identified as the cited paper
+    lookup_failed: bool = False  # Crossref or PubMed did not answer, so "no match" proves nothing
+
+
+@dataclass
 class CitationInput:
     doi: str | None = None
     pmid: str | None = None
@@ -123,6 +132,7 @@ class CitationInput:
     reference_text: str | None = None  # bibliography line `scan` parsed the cited fields from
     citing_sentences: list[CitingSentence] = field(default_factory=list)
     duplicate_locations: list[str] = field(default_factory=list)  # further References entries for this paper
+    resolution: SearchResolution | None = None  # set once a search ran; a match also fills doi/pmid
 
     @property
     def key(self) -> str:

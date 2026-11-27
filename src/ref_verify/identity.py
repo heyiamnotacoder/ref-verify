@@ -30,17 +30,26 @@ def did_you_mean_fix(top: dict[str, Any], *, with_pmid: bool) -> str:
     )
 
 
-def no_identifier_diagnostic(title: str | None, did_you_mean: Candidates) -> Diagnostic:
+def no_identifier_diagnostic(
+    title: str | None, did_you_mean: Candidates, *, matched_by_search: bool = False
+) -> Diagnostic:
+    """``matched_by_search``: the citation cited no identifier, so a confident title/author/year match was tried."""
     if title:
+        message = (
+            "No DOI or PMID cited; searched Crossref/PubMed by title, but no single paper matched the cited title, "
+            "first author, and year."
+            if matched_by_search
+            else "No valid DOI or PMID provided; searched Crossref/PubMed by title for suggestions."
+        )
         return Diagnostic(
             code="NO_IDENTIFIER_PROVIDED",
             severity="WARNING",
-            message="No valid DOI or PMID provided; searched Crossref/PubMed by title instead.",
-            expected="Valid --doi and/or --pmid",
+            message=message,
+            expected="A valid DOI/PMID, or a cited title + first author + year that identify one indexed paper",
             actual=f'title="{title}"',
             details={"did_you_mean": list(did_you_mean)},
-            hint="Exact verification requires a DOI or PMID.",
-            fix=f"Re-run ref-verify with the verified identifier. Candidates: {format_candidates_inline(did_you_mean)}",
+            hint="The reference may be misquoted, not indexed (book, report, website), or fabricated.",
+            fix=f"Check the reference and add its DOI or PMID. Candidates: {format_candidates_inline(did_you_mean)}",
         )
     return Diagnostic(
         code="NO_IDENTIFIER_PROVIDED",
@@ -50,6 +59,40 @@ def no_identifier_diagnostic(title: str | None, did_you_mean: Candidates) -> Dia
         actual="empty citation input",
         hint="Nothing to look up.",
         fix="Provide --doi and/or --pmid (plus optional --title, --author, --year, --journal, --claim).",
+    )
+
+
+def title_search_down_diagnostic(title: str, did_you_mean: Candidates) -> Diagnostic:
+    """ERROR: a citation without identifiers could not be searched, so its existence is unknown (fail-closed)."""
+    return Diagnostic(
+        code="LOOKUP_ERROR",
+        severity="ERROR",
+        message="No DOI or PMID cited, and the Crossref/PubMed title search failed, so the paper could not be found.",
+        expected="HTTP 200 from both Crossref and PubMed title search",
+        actual=f'title="{title}"',
+        details={"did_you_mean": list(did_you_mean)},
+        hint="Transient network failure, rate limit, firewall block, or timeout; this is not evidence the paper is missing.",
+        fix="Check network connectivity and retry with a larger --timeout.",
+    )
+
+
+def resolved_by_search_diagnostic(match: dict[str, Any]) -> Diagnostic:
+    """INFO: the cited reference had no DOI/PMID, and search identified the paper the checks then ran against."""
+    doi, pmid = match.get("doi"), match.get("pmid")
+    found = " / ".join(p for p in (f"DOI {doi}" if doi else "", f"PMID {pmid}" if pmid else "") if p)
+    add = f"doi:{doi}" if doi else f"PMID: {pmid}"
+    return Diagnostic(
+        code="IDENTIFIER_RESOLVED_BY_SEARCH",
+        severity="INFO",
+        message=f"No DOI or PMID was cited; identified the paper by title, first author, and year as {found}.",
+        expected="A DOI or PMID in the reference (optional for most journals)",
+        actual=(
+            f'{found} ("{match.get("title")}", {match.get("first_author") or "unknown"}, {match.get("year")}, '
+            f"title_similarity={match.get('title_similarity')})"
+        ),
+        details={"match": dict(match)},
+        hint="The identifier was found by search; every other check ran against that paper.",
+        fix=f"Optionally add {add} to the reference so readers can locate it.",
     )
 
 
