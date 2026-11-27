@@ -68,6 +68,7 @@ CHECKS: tuple[CheckSpec, ...] = (
                 "NO_IDENTIFIER_PROVIDED",
                 "LOOKUP_ERROR",
                 "UNLINKED_BIBLIOGRAPHY_ENTRIES",
+                "DUPLICATE_REFERENCE",
             }
         ),
     ),

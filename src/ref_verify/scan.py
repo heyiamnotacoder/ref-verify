@@ -386,15 +386,28 @@ def _attach_reference(cit: CitationInput, entry: BibliographyEntry | None) -> No
     cit.location = entry.location
 
 
+def _record_reference_entry(
+    cit: CitationInput, entry: BibliographyEntry | None, first_entry: dict[int, BibliographyEntry]
+) -> None:
+    """Remember a citation's first References entry; any other References entry for it is a duplicate."""
+    if entry is None or not entry.lines[0].is_bibliography_entry:  # body text / numbered lists don't count
+        return
+    seen = first_entry.setdefault(id(cit), entry)
+    if seen is not entry and entry.location not in cit.duplicate_locations:
+        cit.duplicate_locations.append(entry.location)
+
+
 def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
     """One citation per cited paper: DOIs/PMIDs merged across mentions, cited fields from its reference entry.
 
     A later mention merges into an earlier citation of the same DOI or PMID unless it pairs that identifier
-    with a *different* partner ID (kept separate so PMID_DOI_CONFLICT stays visible).
+    with a *different* partner ID (kept separate so PMID_DOI_CONFLICT stays visible). A second References
+    entry for the same paper is recorded in ``duplicate_locations``.
     """
     extracted: list[CitationInput] = []
     by_doi: dict[str, CitationInput] = {}
     by_pmid: dict[str, CitationInput] = {}
+    first_entry: dict[int, BibliographyEntry] = {}  # id(citation) -> its first References entry
 
     for unit in _citation_units(segments):
         doi_key = unit.doi.lower() if unit.doi else None
@@ -412,6 +425,7 @@ def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list
             by_doi.setdefault(doi_key, cit)
         if unit.pmid:
             by_pmid.setdefault(unit.pmid, cit)
+        _record_reference_entry(cit, unit.reference, first_entry)
         _attach_reference(cit, unit.reference)
         cit.label = _citation_label(cit.location or unit.location, cit.doi, cit.pmid)
 

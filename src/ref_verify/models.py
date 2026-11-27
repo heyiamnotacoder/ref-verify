@@ -122,6 +122,7 @@ class CitationInput:
     fulltext: bool = False
     reference_text: str | None = None  # bibliography line `scan` parsed the cited fields from
     citing_sentences: list[CitingSentence] = field(default_factory=list)
+    duplicate_locations: list[str] = field(default_factory=list)  # further References entries for this paper
 
     @property
     def key(self) -> str:

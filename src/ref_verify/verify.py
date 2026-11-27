@@ -13,6 +13,7 @@ from ref_verify.identifiers import clean_identifiers
 from ref_verify.identity import (
     doi_lookup_down,
     doi_not_found_diagnostic,
+    duplicate_reference_diagnostic,
     enrich_doi_syntax_fix,
     id_conflict_diagnostic,
     no_identifier_diagnostic,
@@ -89,6 +90,8 @@ def verify_citation(
     prefetched: PrefetchCache | None = None,
 ) -> VerificationResult:
     clean_doi, clean_pmid, diagnostics = clean_identifiers(cit)
+    if cit.duplicate_locations:
+        diagnostics.append(duplicate_reference_diagnostic(cit))
     did_you_mean: list[dict[str, Any]] = []
 
     if not clean_doi and not clean_pmid:
