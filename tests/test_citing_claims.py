@@ -204,12 +204,27 @@ class TestDuplicateReferences(unittest.TestCase):
         self.assertEqual(dapa.duplicate_locations, ["line 5"])  # the body mention is not a duplicate entry
         self.assertEqual(empa.duplicate_locations, [])
 
+    def test_duplicates_count_within_one_list_only(self) -> None:
+        dup = (
+            "References\n" + DAPA_REF + "\n" + DAPA_REF.replace("1.", "2.", 1) + "\n" + DAPA_REF.replace("1.", "3.", 1)
+        )
+        (same_slide,) = scan.extract_citations_from_segments([("Slide 2", dup)])
+        self.assertEqual(same_slide.duplicate_locations, ["Slide 2", "Slide 2"])
+        # Decks repeat a reference on each slide's own list: that is not a duplicate.
+        per_slide = [("Slide 1", "References\n" + DAPA_REF), ("Slide 5", "References\n" + DAPA_REF)]
+        (repeated,) = scan.extract_citations_from_segments(per_slide)
+        self.assertEqual(repeated.duplicate_locations, [])
+
     def test_duplicate_reference_diagnostic_names_both_entries_and_marks_the_row(self) -> None:
         cit = models.CitationInput(doi="10.1056/NEJMoa1911303", location="line 3", duplicate_locations=["line 5"])
         diag = identity.duplicate_reference_diagnostic(cit)
         self.assertEqual((diag.code, diag.severity), ("DUPLICATE_REFERENCE", "WARNING"))
         self.assertIn("line 3", diag.actual)
         self.assertIn("line 5", diag.actual)
+        triple = identity.duplicate_reference_diagnostic(
+            models.CitationInput(doi="10.1/x", location="Slide 2", duplicate_locations=["Slide 2", "Slide 2"])
+        )
+        self.assertIn("3 times", triple.message)
         self.assertTrue(diag.expected and diag.fix)
         res = models.VerificationResult(
             input=cit, status="WARN", resolved=models.PaperRecord(doi=cit.doi), diagnostics=[diag]

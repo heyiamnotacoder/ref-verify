@@ -250,6 +250,14 @@ _OUTCOME_BEFORE_FOR_RE = re.compile(
 )
 
 
+# "a 35% reduction in heart failure hospitalization": the condition names an outcome, not a population.
+_OUTCOME_AFTER_COND_RE = re.compile(
+    r"\s*(?:-related\s+)?(?:hospitali[sz]ations?|(?:re)?admissions?|visits?|events?|deaths?|mortality|"
+    r"exacerbations?|outcomes?)\b",
+    re.IGNORECASE,
+)
+
+
 _AGE_LEFT_BOUND = r"(?<![A-Za-z0-9.])"
 
 
@@ -664,6 +672,8 @@ def _extract_cohort_qualifiers_uncached(text: str) -> list[CohortQualifier]:
     # 7. Shorthand "in <known condition>" (e.g. "in HFpEF", "in CKD", "in type 2 diabetes")
     for m in _COHORT_KNOWN_COND_RE.finditer(norm):
         if m.group(0).lower().startswith("for") and _OUTCOME_BEFORE_FOR_RE.search(norm[: m.start()]):
+            continue
+        if _OUTCOME_AFTER_COND_RE.match(norm, m.end()):  # "in heart failure hospitalization"
             continue
         cond = m.group(1).strip()
         q = _make_cohort_qualifier(cond, "with", cond)

@@ -706,7 +706,7 @@ EMPA_REG_RESULTS = (
     "infarction or stroke, but in the empagliflozin group there were significantly lower rates of death from "
     "cardiovascular causes (3.7%, vs. 5.9% in the placebo group; 38% relative risk reduction), hospitalization for "
     "heart failure (2.7% and 4.1%, respectively; 35% relative risk reduction), and death from any cause (5.7% and "
-    "8.3%, respectively; 32% relative risk reduction)."
+    "8.3%, respectively; 32% relative risk reduction). There was a 35% reduction in heart failure hospitalization."
 )
 
 
@@ -752,6 +752,12 @@ class TestCohortClauseAttribution(unittest.TestCase):
             ("Empagliflozin cut hospitalization for heart failure by 35%.", ["35%"]),
         ):
             self.assertIsNone(cohort.check_claim_cohort(claim, rec, numbers), claim)
+
+    def test_condition_named_outcome_is_not_a_population(self) -> None:
+        outcome = cohort.extract_cohort_qualifiers("There was a 35% reduction in heart failure hospitalization.")
+        self.assertEqual([q.raw for q in outcome], [])
+        population = cohort.extract_cohort_qualifiers("In heart failure patients, events fell by 35%.")
+        self.assertTrue(population)
 
     def test_wrong_ejection_fraction_population_is_still_flagged(self) -> None:
         rec = models.PaperRecord(

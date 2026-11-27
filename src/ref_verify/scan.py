@@ -220,6 +220,7 @@ class DocLine:
     end: int
     text: str  # stripped
     is_bibliography_entry: bool  # under a References/Bibliography heading (the heading itself excluded)
+    reference_list: int = -1  # which References section (0, 1, ... in document order); -1 outside one
 
 
 @dataclass(frozen=True)
@@ -235,6 +236,7 @@ def document_lines(segments: Sequence[tuple[str, str]]) -> list[DocLine]:
     """Every non-blank line in document order, tracking whether it sits under a References/Bibliography heading."""
     lines: list[DocLine] = []
     in_bib = False
+    list_index = -1  # each References heading starts a new list (e.g. one per slide)
     prev_part: str | None = None
     for seg_idx, (loc, text) in enumerate(segments):
         part = _segment_part_key(loc)
@@ -248,11 +250,12 @@ def document_lines(segments: Sequence[tuple[str, str]]) -> list[DocLine]:
             entry = False
             if BIBLIOGRAPHY_HEADING_RE.match(stripped):
                 in_bib = True
+                list_index += 1
             elif in_bib and _is_bibliography_section_end(stripped):
                 in_bib = False
             else:
                 entry = in_bib
-            lines.append(DocLine(seg_idx, loc, m.start(), m.end(), stripped, entry))
+            lines.append(DocLine(seg_idx, loc, m.start(), m.end(), stripped, entry, list_index if entry else -1))
     return lines
 
 
@@ -389,11 +392,14 @@ def _attach_reference(cit: CitationInput, entry: BibliographyEntry | None) -> No
 def _record_reference_entry(
     cit: CitationInput, entry: BibliographyEntry | None, first_entry: dict[int, BibliographyEntry]
 ) -> None:
-    """Remember a citation's first References entry; any other References entry for it is a duplicate."""
+    """Remember a citation's first References entry; another entry for it *in the same list* is a duplicate.
+
+    Repeating a reference in a different list (each slide's own References) is not a duplicate.
+    """
     if entry is None or not entry.lines[0].is_bibliography_entry:  # body text / numbered lists don't count
         return
     seen = first_entry.setdefault(id(cit), entry)
-    if seen is not entry and entry.location not in cit.duplicate_locations:
+    if seen is not entry and seen.lines[0].reference_list == entry.lines[0].reference_list:
         cit.duplicate_locations.append(entry.location)
 
 

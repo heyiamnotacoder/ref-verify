@@ -144,7 +144,10 @@ def duplicate_reference_diagnostic(cit: CitationInput) -> Diagnostic:
         actual=f"same paper at {', '.join(locations)}",
         details={"locations": locations},
         hint="Duplicated references usually come from merging drafts or re-inserting a citation by hand.",
-        fix=f"Keep the entry at {locations[0]}, delete the others, and renumber the in-text citations that pointed to them.",
+        fix=(
+            f"Keep one entry ({locations[0]}), delete the other {len(locations) - 1}, and renumber the in-text "
+            "citations that pointed to them."
+        ),
     )
 
 
