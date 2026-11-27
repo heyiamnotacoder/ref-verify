@@ -13,6 +13,7 @@ Verify every scientific reference and quantitative claim against live primary-so
    - Single citation or specific claim: `ref-verify check --doi ... --pmid ... --title ... --author ... --year ... --journal ... --claim "..."`
    - Pass `--fulltext` when a quantitative claim cites subgroup or secondary figures absent from the abstract (fetches Open Access JATS XML from NCBI PMC with Europe PMC fallback when a PMCID is available).
    - For `batch` and `scan`, `ref-verify` automatically batches API lookups and runs verification concurrently (tune with `--workers <n>`, default `8`).
+   - `scan` also checks the document's own citing sentences: each sentence citing a reference (`[3]`, superscripts, `(Author et al., 2019)`, inline DOI) has its numbers grounded against that paper's abstract (OA full text with `--fulltext`); problems appear as `CLAIM_NUMBER_NOT_IN_ABSTRACT` quoting the sentence and its location, and JSON results carry `sentence_checks`.
    - `scan` parses the cited title, first author, year, and journal from Vancouver/NLM or APA bibliography entries, so a scanned file is checked field by field; unparseable entries are checked by identifier only.
    - Human-readable `batch`/`scan` output ends with a `CITATION CHECKLIST` table (✓ pass, ⚠ warning, ✗ fail, — not checked) and a `WHAT TO FIX` list. When the user wants a shareable report, add `--html <report.html>` and hand them that file.
 

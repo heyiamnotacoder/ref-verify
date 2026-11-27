@@ -249,6 +249,8 @@ class TestPackageMetadata(unittest.TestCase):
             "cohort",
             "claims",
             "refparse",
+            "grounding",
+            "citing",
             "checklist",
             "table",
             "html_report",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +20,59 @@ SCAN_PMID_RE = re.compile(
     r"(?:\bPMID\s*[:#]?\s*(\d{5,9})\b|pubmed\.ncbi\.nlm\.nih\.gov/(\d{5,9})(?:/|\b))",
     flags=re.IGNORECASE,
 )
+
+
+# A superscript run is a citation marker ("26%.¹,²") only if it is a short number list and does not
+# follow a unit or base ("kg/m²", "10³").
+SUPERSCRIPT_CITATION_RE = re.compile(r"\s*\d{1,3}(?:\s*[,\u2013-]\s*\d{1,3})*\s*")
+_SUPERSCRIPT_UNIT_RE = re.compile(r"(?:\b(?:[kcmµμ]?m|[mkµμ]?g|d?[lL]|mol|s)|/[A-Za-z]+|\d|\^)$")
+
+
+def _paragraph_text(p_elem: ET.Element, is_superscript_run: Callable[[ET.Element], bool]) -> str:
+    """Join a paragraph's text runs, rendering superscript citation numbers as "[n]" markers."""
+    superscript_texts: set[int] = set()
+    for run in p_elem.iter():
+        if run.tag.endswith("}r") and is_superscript_run(run):
+            superscript_texts.update(id(t) for t in run if t.tag.endswith("}t"))
+
+    pieces: list[str] = []
+    pending_sup: list[str] = []
+
+    def flush_sup() -> None:
+        if not pending_sup:
+            return
+        sup = "".join(pending_sup)
+        pending_sup.clear()
+        before = "".join(pieces).rstrip()
+        if SUPERSCRIPT_CITATION_RE.fullmatch(sup) and not _SUPERSCRIPT_UNIT_RE.search(before):
+            pieces.append(f"[{sup.strip()}]")
+        else:
+            pieces.append(sup)
+
+    for t in p_elem.iter():
+        if not ((t.tag.endswith("}t") or t.tag == "t") and t.text):
+            continue
+        if id(t) in superscript_texts:
+            pending_sup.append(t.text)
+        else:
+            flush_sup()
+            pieces.append(t.text)
+    flush_sup()
+    return "".join(pieces).strip()
+
+
+def _docx_superscript(run: ET.Element) -> bool:
+    return any(el.tag.endswith("}vertAlign") and "superscript" in el.attrib.values() for rpr in run for el in rpr)
+
+
+def _pptx_superscript(run: ET.Element) -> bool:
+    for rpr in run:
+        if rpr.tag.endswith("}rPr"):
+            try:
+                return int(rpr.attrib.get("baseline", "0")) > 0
+            except ValueError:
+                return False
+    return False
 
 
 def _extract_segments_from_docx(path: Path) -> list[tuple[str, str]]:
@@ -45,8 +98,7 @@ def _extract_segments_from_docx(path: Path) -> list[tuple[str, str]]:
             p_idx = 0
             for elem in root.iter():
                 if elem.tag.endswith("}p") or elem.tag == "p":
-                    texts = [t.text for t in elem.iter() if (t.tag.endswith("}t") or t.tag == "t") and t.text]
-                    joined = "".join(texts).strip()
+                    joined = _paragraph_text(elem, _docx_superscript)
                     if joined:
                         p_idx += 1
                         segments.append((f"{part_label}:p{p_idx}", joined))
@@ -78,8 +130,7 @@ def _extract_segments_from_pptx(path: Path) -> list[tuple[str, str]]:
             paras: list[str] = []
             for elem in root.iter():
                 if elem.tag.endswith("}p") or elem.tag == "p":
-                    texts = [t.text for t in elem.iter() if (t.tag.endswith("}t") or t.tag == "t") and t.text]
-                    joined = "".join(texts).strip()
+                    joined = _paragraph_text(elem, _pptx_superscript)
                     if joined:
                         paras.append(joined)
             if paras:

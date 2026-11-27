@@ -134,7 +134,9 @@ def _applicable_checks(res: VerificationResult) -> set[str]:
     if res.resolved is not None:
         applicable.add("integrity")
         applicable |= checked_metadata_fields(res.input, res.resolved)
-        if res.claim_report is not None:
+        # A claim is only "checked" when it carried numbers to look up; wording alone is never ticked.
+        reports = ([res.claim_report] if res.claim_report else []) + [c.report for c in res.sentence_checks]
+        if any(r.extracted_numbers for r in reports):
             applicable.add("claim")
     return applicable
 

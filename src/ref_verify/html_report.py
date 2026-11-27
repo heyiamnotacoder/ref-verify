@@ -15,7 +15,7 @@ from ref_verify.checklist import (
     status_counts,
     status_verdict,
 )
-from ref_verify.models import Diagnostic, PaperRecord
+from ref_verify.models import Diagnostic, PaperRecord, SentenceCheck
 from ref_verify.table import UNICODE_SYMBOLS, legend
 
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
@@ -65,6 +65,9 @@ dt{color:var(--muted)}dd{margin:0;word-break:break-word}
 .problem code{font-size:12px;color:var(--muted)}
 .problem .fix{margin-top:4px}
 .ok{color:var(--pass);margin:0}
+.muted{color:var(--muted);font-size:13px}
+.cited-in ul{margin:6px 0 12px;padding-left:18px}.cited-in li{margin:6px 0}
+.cited-in .v{font-weight:600;font-size:12px;margin:4px 4px 0 0}
 @media print{.toolbar{display:none}tr.detail{display:table-row!important}th{position:static}}
 """
 
@@ -133,12 +136,40 @@ def _problem_html(label: str, d: Diagnostic) -> str:
     return f'<div class="problem {cls}">' + "".join(parts) + "</div>"
 
 
+def _number_chip(number: str, check: SentenceCheck) -> str:
+    if number in check.missing_after_cocitation:
+        cls, tip = "warn", "not found in any paper this sentence cites"
+    elif number in check.report.missing_numbers:
+        cls, tip = "info", "found in another paper this sentence cites"
+    else:
+        cls, tip = "pass", "found in this paper"
+    return f'<span class="v {cls}" title="{tip}">{escape(number)}</span>'
+
+
+def _cited_in_html(checks: Sequence[SentenceCheck]) -> str:
+    items = []
+    for c in checks:
+        r = c.report
+        if not r.extracted_numbers:
+            numbers = '<span class="muted">no numbers to check</span>'
+        elif not r.abstract_available:
+            numbers = '<span class="muted">abstract unavailable: numbers not checked</span>'
+        else:
+            numbers = " ".join(_number_chip(n, c) for n in r.extracted_numbers)
+        items.append(
+            f'<li><span class="muted">{escape(c.sentence.location)}</span> {escape(c.sentence.text)}<div>{numbers}</div></li>'
+        )
+    return f'<div class="cited-in"><strong>Cited in your text</strong><ul>{"".join(items)}</ul></div>'
+
+
 def _detail_html(row: ChecklistRow) -> str:
     parts: list[str] = []
     if row.reference_text:
         parts.append(f"<dl><dt>Cited as</dt><dd>{escape(row.reference_text)}</dd></dl>")
     if row.result is not None and row.result.resolved is not None:
         parts.append(_official_block(row.result.resolved))
+    if row.result is not None and row.result.sentence_checks:
+        parts.append(_cited_in_html(row.result.sentence_checks))
     problems = row.problems()
     if problems:
         parts.extend(_problem_html(spec.header if spec else "Other", d) for spec, d in problems)

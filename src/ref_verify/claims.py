@@ -21,15 +21,17 @@ def evaluate_claim(
     rec: PaperRecord,
     fulltext_requested: bool = False,
     fulltext: FulltextResult | None = None,
+    claim_numbers: list[str] | None = None,
 ) -> tuple[ClaimReport, list[Diagnostic]]:
     """Ground ``claim`` against ``rec.abstract`` and, when requested, an already-fetched OA ``fulltext``.
 
     Pure: the caller fetches full text. ``fulltext_requested`` with no PMCID yields FULLTEXT_UNAVAILABLE;
-    with a PMCID but ``fulltext=None`` the full-text check is skipped.
+    with a PMCID but ``fulltext=None`` the full-text check is skipped. ``claim_numbers`` overrides the
+    numbers extracted from ``claim`` (citing sentences filter out years and stray digits first).
     """
     report = ClaimReport(
         claim=claim,
-        extracted_numbers=extract_claim_numbers(claim),
+        extracted_numbers=extract_claim_numbers(claim) if claim_numbers is None else list(claim_numbers),
         extracted_keywords=extract_claim_keywords(claim),
         abstract_available=bool(rec.abstract),
     )
