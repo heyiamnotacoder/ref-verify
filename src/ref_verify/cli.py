@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ref_verify import __version__
+from ref_verify.checklist import build_checklist
+from ref_verify.html_report import render_html_report
 from ref_verify.http_client import DEFAULT_TIMEOUT, HttpClient
-from ref_verify.models import CitationInput, Diagnostic, VerificationResult
+from ref_verify.models import CitationInput, Diagnostic, UnlinkedEntry, VerificationResult
 from ref_verify.report import (
     format_result_text,
     format_summary_text,
@@ -27,6 +32,7 @@ from ref_verify.scan import (
     extract_text_segments,
     extract_unlinked_bibliography_entries,
 )
+from ref_verify.table import ASCII_SYMBOLS, UNICODE_SYMBOLS, Symbols, format_checklist_table
 from ref_verify.verify import DEFAULT_WORKERS, verify_citation, verify_citations_batch
 
 
@@ -46,6 +52,38 @@ def _exit_code(results: Sequence[VerificationResult], strict: bool, extra_warnin
 def _print_results(results: Sequence[VerificationResult], show_abstract: bool) -> None:
     for i, res in enumerate(results, start=1):
         print(format_result_text(res, index=i, show_abstract=show_abstract))
+
+
+def _terminal_style() -> tuple[Symbols, bool, int]:
+    """(symbols, color, width) for stdout: ASCII when the encoding cannot show ticks, color only on a TTY."""
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "".join(vars(UNICODE_SYMBOLS).values()).encode(encoding)
+        symbols = UNICODE_SYMBOLS
+    except (LookupError, UnicodeEncodeError):
+        symbols = ASCII_SYMBOLS
+    color = bool(getattr(sys.stdout, "isatty", lambda: False)()) and "NO_COLOR" not in os.environ
+    return symbols, color, shutil.get_terminal_size((120, 24)).columns
+
+
+def _print_checklist(results: Sequence[VerificationResult], unlinked: Sequence[UnlinkedEntry] = ()) -> None:
+    symbols, color, width = _terminal_style()
+    print(format_checklist_table(build_checklist(results, unlinked), symbols=symbols, color=color, width=width))
+
+
+def _write_html_report(
+    path: str, results: Sequence[VerificationResult], unlinked: Sequence[UnlinkedEntry], source: str
+) -> bool:
+    page = render_html_report(
+        build_checklist(results, unlinked), source=source, generated=datetime.now().strftime("%Y-%m-%d %H:%M")
+    )
+    try:
+        Path(path).write_text(page, encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: Could not write HTML report '{path}': {exc}", file=sys.stderr)
+        return False
+    print(f"HTML report written to {path}", file=sys.stderr)
+    return True
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -115,7 +153,10 @@ def cmd_batch(args: argparse.Namespace) -> int:
         _emit_json({"summary": status_counts(results), "results": [result_to_dict(r) for r in results]})
     else:
         _print_results(results, show_abstract=not args.no_abstract)
+        _print_checklist(results)
         print(format_summary_text(results, header="BATCH SUMMARY"))
+    if args.html and not _write_html_report(args.html, results, (), source=args.input):
+        return 2
     return _exit_code(results, args.strict)
 
 
@@ -163,8 +204,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
             _print_results(results, show_abstract=not args.no_abstract)
         if scan_diag:
             print(format_unlinked_bibliography_text(scan_diag, unlinked_entries))
+        if citations or unlinked_entries:
+            _print_checklist(results, unlinked_entries)
         if citations:
             print(format_summary_text(results, header="SCAN SUMMARY"))
+    if args.html and not _write_html_report(args.html, results, unlinked_entries, source=str(path)):
+        return 2
     return _exit_code(results, args.strict, extra_warnings=bool(scan_diagnostics))
 
 
@@ -192,6 +237,17 @@ def _worker_flags() -> argparse.ArgumentParser:
     return pool
 
 
+def _report_flags() -> argparse.ArgumentParser:
+    """Human-report flag shared by the multi-citation subcommands."""
+    report = argparse.ArgumentParser(add_help=False)
+    report.add_argument(
+        "--html",
+        metavar="PATH",
+        help="Also write a self-contained HTML checklist report (one row per citation) to PATH",
+    )
+    return report
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ref-verify",
@@ -202,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"ref-verify {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    common, pool = _output_flags(), _worker_flags()
+    common, pool, report = _output_flags(), _worker_flags(), _report_flags()
 
     p_check = sub.add_parser(
         "check", parents=[common], help="Verify a single citation and optional quantitative claim."
@@ -223,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_batch = sub.add_parser(
         "batch",
-        parents=[common, pool],
+        parents=[common, pool, report],
         help="Verify a JSON array of citations/claims from a file (or '-' for stdin).",
     )
     p_batch.add_argument("input", help="Path to JSON file containing an array of citation objects (or '-' for stdin)")
@@ -236,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_scan = sub.add_parser(
         "scan",
-        parents=[common, pool],
+        parents=[common, pool, report],
         help="Auto-extract and verify all DOIs and PMIDs from .md/.txt/.docx/.pptx files.",
     )
     p_scan.add_argument("file", help="Path to .md, .txt, .docx, or .pptx file")

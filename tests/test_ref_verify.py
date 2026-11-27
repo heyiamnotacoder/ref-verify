@@ -238,7 +238,21 @@ class TestPackageMetadata(unittest.TestCase):
 
     def test_pure_core_never_imports_network_layer(self) -> None:
         # CODING_STANDARDS.md "Pure core" + "Layered modules": only higher layers may touch HttpClient/sources.
-        pure = ["models", "lexicons", "text", "identifiers", "identity", "metadata", "quant", "cohort", "claims"]
+        pure = [
+            "models",
+            "lexicons",
+            "text",
+            "identifiers",
+            "identity",
+            "metadata",
+            "quant",
+            "cohort",
+            "claims",
+            "refparse",
+            "checklist",
+            "table",
+            "html_report",
+        ]
         pkg_dir = Path(models.__file__).parent
         for name in pure:
             tree = ast.parse((pkg_dir / f"{name}.py").read_text(encoding="utf-8"))

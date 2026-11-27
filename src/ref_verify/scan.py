@@ -5,10 +5,12 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from ref_verify.identifiers import DOI_CORE_RE, strip_unbalanced_closing
 from ref_verify.models import CitationInput, Diagnostic, UnlinkedEntry
+from ref_verify.refparse import parse_reference
 from ref_verify.text import truncate
 
 SCAN_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s<>\"'{}|\\^\[\]`]+)")
@@ -105,67 +107,6 @@ def extract_text_segments(path: Path) -> list[tuple[str, str]]:
     return [(f"line {i}", line) for i, line in enumerate(raw.splitlines(), start=1) if line.strip()]
 
 
-def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
-    """Extract deduplicated DOIs and PMIDs from text segments, pairing co-located DOI+PMID pairs."""
-    extracted: list[CitationInput] = []
-    seen_dois: set[str] = set()
-    seen_pmids: set[str] = set()
-
-    for loc, text in segments:
-        dois_found: list[tuple[int, str]] = []
-        for m in SCAN_DOI_RE.finditer(text):
-            cleaned, _ = strip_unbalanced_closing(m.group(1))
-            if cleaned and DOI_CORE_RE.match(cleaned):
-                dois_found.append((m.start(), cleaned))
-
-        pmids_found: list[tuple[int, str]] = []
-        for m in SCAN_PMID_RE.finditer(text):
-            pid = m.group(1) or m.group(2)
-            if pid:
-                pmids_found.append((m.start(), pid))
-
-        # Pair a DOI and PMID if they appear near each other (within 160 chars) in the same segment
-        used_pmid_idxs: set[int] = set()
-        for d_pos, doi in dois_found:
-            d_key = doi.lower()
-            paired_pmid: str | None = None
-            for idx, (p_pos, pmid) in enumerate(pmids_found):
-                if idx in used_pmid_idxs:
-                    continue
-                if abs(p_pos - d_pos) <= 160:
-                    paired_pmid = pmid
-                    used_pmid_idxs.add(idx)
-                    break
-
-            if d_key in seen_dois and (not paired_pmid or paired_pmid in seen_pmids):
-                continue
-            seen_dois.add(d_key)
-            if paired_pmid:
-                seen_pmids.add(paired_pmid)
-            extracted.append(
-                CitationInput(
-                    doi=doi,
-                    pmid=paired_pmid,
-                    location=loc,
-                    label=f"{loc} ({doi}" + (f", PMID:{paired_pmid})" if paired_pmid else ")"),
-                )
-            )
-
-        for idx, (_, pmid) in enumerate(pmids_found):
-            if idx in used_pmid_idxs or pmid in seen_pmids:
-                continue
-            seen_pmids.add(pmid)
-            extracted.append(
-                CitationInput(
-                    pmid=pmid,
-                    location=loc,
-                    label=f"{loc} (PMID:{pmid})",
-                )
-            )
-
-    return extracted
-
-
 BIBLIOGRAPHY_HEADING_RE = re.compile(
     r"^(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*\.?\s+)?(?:references|bibliography|works\s+cited|literature\s+cited)\s*:?$",
     flags=re.IGNORECASE,
@@ -209,38 +150,240 @@ def _segment_part_key(loc: str) -> str:
     return "body"
 
 
-def extract_unlinked_bibliography_entries(segments: Sequence[tuple[str, str]]) -> list[UnlinkedEntry]:
-    """Find bibliography entries under a References/Bibliography heading that contain no DOI or PMID."""
-    unlinked: list[UnlinkedEntry] = []
+@dataclass(frozen=True)
+class DocLine:
+    """One non-blank line of a segment: its span in the segment text and whether it is a References entry line."""
+
+    segment: int
+    location: str
+    start: int
+    end: int
+    text: str  # stripped
+    is_bibliography_entry: bool  # under a References/Bibliography heading (the heading itself excluded)
+
+
+@dataclass(frozen=True)
+class BibliographyEntry:
+    """One reference under a References heading; a numbered entry absorbs its unnumbered wrapped lines."""
+
+    location: str  # location of the entry's first line
+    text: str  # entry lines joined with single spaces
+    lines: tuple[DocLine, ...]
+
+
+def document_lines(segments: Sequence[tuple[str, str]]) -> list[DocLine]:
+    """Every non-blank line in document order, tracking whether it sits under a References/Bibliography heading."""
+    lines: list[DocLine] = []
     in_bib = False
     prev_part: str | None = None
-
-    for loc, text in segments:
+    for seg_idx, (loc, text) in enumerate(segments):
         part = _segment_part_key(loc)
         if prev_part is not None and part != prev_part:
             in_bib = False
         prev_part = part
-
-        for raw_line in text.splitlines():
-            stripped = raw_line.strip()
+        for m in re.finditer(r"[^\r\n]+", text):
+            stripped = m.group(0).strip()
             if not stripped:
                 continue
+            entry = False
             if BIBLIOGRAPHY_HEADING_RE.match(stripped):
                 in_bib = True
-                continue
-            if not in_bib:
-                continue
-            if _is_bibliography_section_end(stripped):
+            elif in_bib and _is_bibliography_section_end(stripped):
                 in_bib = False
-                continue
-            if SCAN_DOI_RE.search(stripped) or SCAN_PMID_RE.search(stripped):
-                continue
-            looks_like_entry = (NUMBERED_ENTRY_RE.match(stripped) and len(stripped) >= 15) or (
-                YEAR_OR_URL_RE.search(stripped) and len(stripped) >= 20
-            )
-            if looks_like_entry:
-                unlinked.append(UnlinkedEntry(location=loc, text=stripped))
+            else:
+                entry = in_bib
+            lines.append(DocLine(seg_idx, loc, m.start(), m.end(), stripped, entry))
+    return lines
 
+
+def bibliography_entries(lines: Sequence[DocLine]) -> list[BibliographyEntry]:
+    """Group consecutive References lines into entries: an unnumbered line continues a numbered entry."""
+    entries: list[BibliographyEntry] = []
+    current: list[DocLine] = []
+    numbered = False
+
+    def flush() -> None:
+        if current:
+            entries.append(BibliographyEntry(current[0].location, " ".join(ln.text for ln in current), tuple(current)))
+            current.clear()
+
+    for line in lines:
+        if not line.is_bibliography_entry:
+            flush()
+            continue
+        starts_entry = bool(NUMBERED_ENTRY_RE.match(line.text))
+        if current and numbered and not starts_entry:
+            current.append(line)
+            continue
+        flush()
+        current.append(line)
+        numbered = starts_entry
+    flush()
+    return entries
+
+
+@dataclass(frozen=True)
+class _CitationUnit:
+    """One DOI and/or PMID cited together, with the reference text (if any) that cites it."""
+
+    order: tuple[int, int]  # (segment, position) of its first identifier, for document order
+    doi: str | None
+    pmid: str | None
+    location: str
+    reference: BibliographyEntry | None
+
+
+def _identifier_mentions(text: str) -> list[tuple[int, str, str]]:
+    """(position, "doi" | "pmid", value) for every identifier in ``text``, in reading order."""
+    found: list[tuple[int, str, str]] = []
+    for m in SCAN_DOI_RE.finditer(text):
+        cleaned, _ = strip_unbalanced_closing(m.group(1))
+        if cleaned and DOI_CORE_RE.match(cleaned):
+            found.append((m.start(), "doi", cleaned))
+    for m in SCAN_PMID_RE.finditer(text):
+        pid = m.group(1) or m.group(2)
+        if pid:
+            found.append((m.start(), "pmid", pid))
+    return sorted(found)
+
+
+def _entry_units(entry: BibliographyEntry, order: tuple[int, int]) -> list[_CitationUnit]:
+    """A reference entry cites one paper: its first DOI and first PMID pair regardless of distance."""
+    mentions = _identifier_mentions(entry.text)
+    dois = list(dict.fromkeys(v for _, kind, v in mentions if kind == "doi"))
+    pmids = list(dict.fromkeys(v for _, kind, v in mentions if kind == "pmid"))
+    if not dois and not pmids:
+        return []
+    pairs: list[tuple[str | None, str | None]] = [(dois[0] if dois else None, pmids[0] if pmids else None)]
+    pairs += [(d, None) for d in dois[1:]] + [(None, p) for p in pmids[1:]]
+    return [_CitationUnit(order, d, p, entry.location, entry) for d, p in pairs]
+
+
+def _body_units(seg_idx: int, loc: str, mentions: Sequence[tuple[int, str, str]]) -> list[_CitationUnit]:
+    """Body text: pair a DOI with a PMID appearing within 160 characters of it."""
+    dois = [(pos, v) for pos, kind, v in mentions if kind == "doi"]
+    pmids = [(pos, v) for pos, kind, v in mentions if kind == "pmid"]
+    units: list[_CitationUnit] = []
+    used: set[int] = set()
+    for d_pos, doi in dois:
+        paired: str | None = None
+        for idx, (p_pos, pmid) in enumerate(pmids):
+            if idx not in used and abs(p_pos - d_pos) <= 160:
+                paired = pmid
+                used.add(idx)
+                break
+        units.append(_CitationUnit((seg_idx, d_pos), doi, paired, loc, None))
+    units += [
+        _CitationUnit((seg_idx, p_pos), None, pmid, loc, None) for i, (p_pos, pmid) in enumerate(pmids) if i not in used
+    ]
+    return units
+
+
+def _citation_units(segments: Sequence[tuple[str, str]]) -> list[_CitationUnit]:
+    lines = document_lines(segments)
+    entry_of = {line: entry for entry in bibliography_entries(lines) for line in entry.lines}
+    lines_by_segment: dict[int, list[DocLine]] = {}
+    for line in lines:
+        lines_by_segment.setdefault(line.segment, []).append(line)
+
+    units: list[_CitationUnit] = []
+    seen_entries: set[int] = set()
+    for seg_idx, (loc, text) in enumerate(segments):
+        body: list[tuple[int, str, str]] = []
+        for mention in _identifier_mentions(text):
+            pos = mention[0]
+            line = next((ln for ln in lines_by_segment.get(seg_idx, []) if ln.start <= pos < ln.end), None)
+            entry = entry_of.get(line) if line is not None else None
+            if entry is None and line is not None and NUMBERED_ENTRY_RE.match(line.text):
+                entry = BibliographyEntry(line.location, line.text, (line,))  # numbered list outside References
+                entry_of[line] = entry
+            if entry is None:
+                body.append(mention)
+            elif id(entry) not in seen_entries:
+                seen_entries.add(id(entry))
+                units += _entry_units(entry, (seg_idx, pos))
+        units += _body_units(seg_idx, loc, body)
+    return sorted(units, key=lambda u: u.order)
+
+
+def _citation_label(loc: str, doi: str | None, pmid: str | None) -> str:
+    if doi:
+        return f"{loc} ({doi}" + (f", PMID:{pmid})" if pmid else ")")
+    return f"{loc} (PMID:{pmid})"
+
+
+def _attach_reference(cit: CitationInput, entry: BibliographyEntry | None) -> None:
+    """Fill cited title/author/year/journal from the first reference entry citing this paper.
+
+    Body-text mentions stay identifier-only; when the reference entry comes later, the citation is
+    re-pointed at that entry so "Where" shows the reference the author actually wrote.
+    """
+    if cit.reference_text is not None or entry is None:
+        return
+    ref = parse_reference(entry.text)
+    cit.title, cit.author, cit.year, cit.journal = ref.title, ref.author, ref.year, ref.journal
+    cit.reference_text = entry.text
+    cit.location = entry.location
+
+
+def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
+    """One citation per cited paper: DOIs/PMIDs merged across mentions, cited fields from its reference entry.
+
+    A later mention merges into an earlier citation of the same DOI or PMID unless it pairs that identifier
+    with a *different* partner ID (kept separate so PMID_DOI_CONFLICT stays visible).
+    """
+    extracted: list[CitationInput] = []
+    by_doi: dict[str, CitationInput] = {}
+    by_pmid: dict[str, CitationInput] = {}
+
+    for unit in _citation_units(segments):
+        doi_key = unit.doi.lower() if unit.doi else None
+        cit = (by_doi.get(doi_key) if doi_key else None) or (by_pmid.get(unit.pmid) if unit.pmid else None)
+        conflicting = cit is not None and (
+            (unit.pmid is not None and cit.pmid is not None and cit.pmid != unit.pmid)
+            or (doi_key is not None and cit.doi is not None and cit.doi.lower() != doi_key)
+        )
+        if cit is None or conflicting:
+            cit = CitationInput(doi=unit.doi, pmid=unit.pmid, location=unit.location)
+            extracted.append(cit)
+        cit.doi = cit.doi or unit.doi
+        cit.pmid = cit.pmid or unit.pmid
+        if doi_key:
+            by_doi.setdefault(doi_key, cit)
+        if unit.pmid:
+            by_pmid.setdefault(unit.pmid, cit)
+        _attach_reference(cit, unit.reference)
+        cit.label = _citation_label(cit.location or unit.location, cit.doi, cit.pmid)
+
+    return extracted
+
+
+def unlinked_entry_diagnostic(entry: UnlinkedEntry) -> Diagnostic:
+    """Per-entry form of UNLINKED_BIBLIOGRAPHY_ENTRIES, used for one checklist row."""
+    return Diagnostic(
+        code="UNLINKED_BIBLIOGRAPHY_ENTRIES",
+        severity="WARNING",
+        message="Bibliography entry has no DOI or PMID, so it was not verified.",
+        expected="A DOI or PMID in this reference entry",
+        actual=f"{entry.location}: {truncate(entry.text, 160)}",
+        details={"location": entry.location},
+        hint="Plain-text references are invisible to identifier-based verification.",
+        fix="Add the DOI or PMID to this entry, or verify it with `ref-verify batch`.",
+    )
+
+
+def extract_unlinked_bibliography_entries(segments: Sequence[tuple[str, str]]) -> list[UnlinkedEntry]:
+    """Find bibliography entries under a References/Bibliography heading that contain no DOI or PMID."""
+    unlinked: list[UnlinkedEntry] = []
+    for entry in bibliography_entries(document_lines(segments)):
+        text = entry.text
+        if SCAN_DOI_RE.search(text) or SCAN_PMID_RE.search(text):
+            continue
+        looks_like_entry = (NUMBERED_ENTRY_RE.match(text) and len(text) >= 15) or (
+            YEAR_OR_URL_RE.search(text) and len(text) >= 20
+        )
+        if looks_like_entry:
+            unlinked.append(UnlinkedEntry(location=entry.location, text=text))
     return unlinked
 
 

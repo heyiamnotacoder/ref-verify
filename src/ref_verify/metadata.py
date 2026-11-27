@@ -470,12 +470,28 @@ def check_retraction_and_notices(rec: PaperRecord) -> list[Diagnostic]:
     return diags
 
 
+def checked_metadata_fields(cit: CitationInput, resolved: PaperRecord) -> frozenset[str]:
+    """Cited fields that can actually be compared against ``resolved`` (the rest stay unchecked, never passed)."""
+    fields: set[str] = set()
+    if cit.title and resolved.title:
+        fields.add("title")
+    if cit.author:
+        fields.add("author")  # an empty official author list still yields a fail-closed WARNING
+    cited_year = str(cit.year).strip() if cit.year is not None else ""
+    if cited_year and (resolved.all_years() or parse_year_int(cited_year) is None):
+        fields.add("year")
+    if cit.journal and resolved.journal_variants():
+        fields.add("journal")
+    return frozenset(fields)
+
+
 def check_metadata(cit: CitationInput, resolved: PaperRecord) -> list[Diagnostic]:
     """All record-level checks for a resolved paper: notices first, then cited title/author/year/journal."""
+    fields = checked_metadata_fields(cit, resolved)
     checks = [
-        check_title(cit.title, resolved.title) if cit.title and resolved.title else None,
-        check_author(cit.author, resolved.authors) if cit.author else None,
-        check_year(str(cit.year), resolved) if cit.year is not None and str(cit.year).strip() != "" else None,
-        check_journal(cit.journal, resolved) if cit.journal else None,
+        check_title(cit.title, resolved.title) if "title" in fields and cit.title and resolved.title else None,
+        check_author(cit.author, resolved.authors) if "author" in fields and cit.author else None,
+        check_year(str(cit.year), resolved) if "year" in fields else None,
+        check_journal(cit.journal, resolved) if "journal" in fields and cit.journal else None,
     ]
     return check_retraction_and_notices(resolved) + [d for d in checks if d is not None]

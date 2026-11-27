@@ -26,7 +26,8 @@ flowchart LR
 - **Retraction & editorial notice checks** — Detects retracted papers (`CRITICAL`), expressions of concern (`WARNING`), retraction notices (`WARNING`), and errata/corrections (`INFO`).
 - **Field-level metadata diffs** — Checks title (distinguishing subtitle truncation from wrong papers via similarity + token diffs), first author (distinguishing co-author position from absent authors), publication year (distinguishing ±1-year epub-ahead-of-print offsets), and journal name/abbreviation (with biomedical alias normalization).
 - **Quantitative claim grounding** — Extracts numbers, percentages, HR/OR/RR, 95% CIs, p-values, sample sizes, and doses from a claim, diffs them against the official abstract (and Open Access JATS full-text XML from NCBI PMC with Europe PMC fallback when `--fulltext` is passed), and prints the matched sentences plus full abstract.
-- **Document scanning** — Extracts and verifies every DOI and PMID directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes).
+- **Document scanning** — Extracts and verifies every DOI and PMID directly from `.md`, `.txt`, `.docx`, and `.pptx` files (including footnotes, split XML runs, and slide speaker notes). For entries under a References/Bibliography heading (or numbered entries), it also parses the cited title, first author, year, and journal from Vancouver/NLM or APA text so those fields are cross-checked too; ambiguous entries are left unparsed rather than guessed.
+- **Human-readable checklist** — `batch` and `scan` end with a one-row-per-citation table of ✓ / ⚠ / ✗ / — marks for every check, followed by a "what to fix" list; `--html report.html` writes the same checklist as a self-contained page with clickable DOIs and expandable details.
 - **Zero runtime dependencies** — Pure Python 3.10+ standard library. Runs anywhere without virtualenvs or compiled wheels.
 
 ---
@@ -115,7 +116,38 @@ cat refs.json | ref-verify batch - --json
 ref-verify scan manuscript.docx
 ref-verify scan journal_club.pptx --no-abstract
 ref-verify scan review.md --json
+ref-verify scan thesis.docx --no-abstract --html thesis-references.html
 ```
+
+### 4. Read the checklist
+
+Human-readable `batch` and `scan` output ends with a checklist: one row per citation, one column per check.
+
+```text
+CITATION CHECKLIST  (6 references: 1 pass, 1 warn, 3 fail, 1 unverified)
+#  Where    Reference                    DOI/PMID  Retraction  Title  Author  Year  Journal  Claim  Result
+----------------------------------------------------------------------------------------------------------
+1  line 5   McMurray 2019, 10.1056/N...     ✓          ✓         ✓      ✓      ✓       ✓       —    PASS
+2  line 6   Zinman 2015, 10.1056/NEJ...     ✓          ✓         ✓      ✓      ⚠       ✓       —    WARN
+3  line 7   Packer 2020, 10.1056/NEJ...     ✓          ✓         ✓      ✓      ✓       ✗       —    FAIL
+4  line 8   Wakefield 1998, 10.1016/...     ✓          ✗         ✓      ✓      ✓       ✓       —    FAIL
+5  line 9   10.1136/bmj.n99999999           ✗          —         —      —      —       —       —    FAIL
+6  line 10  6. Ali F, Vyas J, Finlay...     ⚠          —         —      —      —       —       —    UNVERIFIED
+----------------------------------------------------------------------------------------------------------
+✓ pass   ⚠ warning   ✗ fail   i note   — not checked (no value to compare, or the paper did not resolve)
+
+WHAT TO FIX:
+  [2] line 6 | Zinman 2015, 10.1056/NEJMoa1504720
+      ⚠ Year: YEAR_MISMATCH: Cited year 2016 differs by ±1 year from official dates (published_print=2015 / published_online=2015).
+        Fix: Update citation year to 2015 to match the official record.
+  ...
+```
+
+- **—** means the check did not run (no cited year was given, the official record has no journal, or the DOI/PMID did not resolve). A ✓ always means the value was compared and matched.
+- A numbered reference wrapped over several lines is read as one entry, and a paper cited in the body and again in the References list is one row, pointing at the reference entry.
+- **UNVERIFIED** rows are bibliography entries with no DOI or PMID; add an identifier or verify them with `batch`.
+- Ticks fall back to ASCII (`ok ! X -`) when the terminal encoding cannot show them; colour is used only on a TTY and honours `NO_COLOR`.
+- `--html <path>` writes the same checklist as a standalone page (no external assets) with summary counts, a "Needs attention" filter, clickable DOI/PubMed links, and per-row details (cited-as text, official record, and every diagnostic with its fix).
 
 ### Flags & exit codes
 
@@ -127,10 +159,11 @@ ref-verify scan review.md --json
 | `--strict` | Treat `WARNING` diagnostics as failures (exit `1`). |
 | `--timeout <sec>` | Per-request HTTP timeout in seconds (default: `15.0`). |
 | `--workers <n>` | Max concurrent verification workers for `batch` and `scan` (default: `8`; use `1` for sequential). |
+| `--html <path>` | Also write a self-contained HTML checklist report for `batch` and `scan` (works alongside `--json`). |
 
 - **Exit `0`**: Pass (or warning without `--strict`).
 - **Exit `1`**: Fail (any `CRITICAL`/`ERROR`, or `WARNING` with `--strict`).
-- **Exit `2`**: Invalid arguments, malformed JSON, or unreadable input file.
+- **Exit `2`**: Invalid arguments, malformed JSON, unreadable input file, or an `--html` path that cannot be written.
 
 ---
 
@@ -219,6 +252,33 @@ CLAIM_CHECK:
 
 - **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Open Access full text (NCBI PMC / Europe PMC)—never from model memory.
 - **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without an Open Access XML copy in NCBI PMC or Europe PMC, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
+- **Live APIs required**: Every check needs Crossref, PubMed, or Europe PMC to answer. During an outage a citation shows `LOOKUP_ERROR` (✗ in DOI/PMID) rather than a false pass.
+
+### Document scanning (`scan`)
+
+- **File types**: `.md`, `.txt`, `.docx`, and `.pptx` only. PDFs, `.doc`, `.odt`, Keynote, and Google Docs/Slides must be exported first.
+- **What counts as a reference list**: Plain-text references (no DOI/PMID) are found only under a heading named References, Bibliography, Works Cited, or Literature Cited. Lists under other headings ("Sources", "Literature", "Further reading") and slide footnotes without such a heading produce no row.
+- **Identifiers on one line**: A DOI broken across two lines (or split by a hyphen at a line end) is not detected.
+- **Duplicate references are merged**: The same DOI/PMID cited twice in the References list becomes one row; the duplication itself is not reported.
+- **Unlinked entries are not verified**: An `UNVERIFIED` row is listed but never looked up (no title search). Add the DOI/PMID, or check it with `batch` using `title`/`author`/`year`.
+- **Wrapped references**: A numbered reference wrapped over several lines is read as one entry. An *unnumbered* reference wrapped over several lines (e.g. an APA list in a `.txt` file) is read line by line and can produce extra `UNVERIFIED` rows.
+- **No claim checking in `scan`**: The Claim column is always "—" for scanned files. Claims are checked only when given explicitly (`check --claim`, or `claim` in `batch` JSON).
+
+### Reading cited title, author, year, and journal
+
+`scan` fills these fields only when the reference entry's shape is unambiguous; otherwise the column shows "—" (not checked) instead of guessing.
+
+- **Supported styles**: Vancouver/NLM (including Lancet-style punctuation) and APA. Harvard-style "Smith J (2019) Title…" yields author and year only.
+- **Left unchecked by design**: titles containing a period ("vs.", "E. coli", "St. John's"), dotted journal abbreviations ("N. Engl. J. Med."), surnames starting with a lowercase particle ("van der Meer"), group/committee authors, one- or two-word titles (acronyms like "DAPA-HF"), and bracketed translated titles ("[Effect of …]").
+- **Where parsing applies**: only to lines under a References heading or lines starting with a number ("1.", "[1]"). A DOI in running text is checked by identifier only; if the same paper also appears in References, the row uses that entry.
+- **Residual risk**: An unusual entry that still matches the expected shape can be mis-split and show a false Title/Journal mismatch. The "Cited as" line under each problem shows the exact text that was read, so a mis-read is easy to spot.
+
+### Checklist table and HTML report
+
+- **Terminal width**: On narrow terminals the Where and Reference columns are truncated; the HTML report and the "What to fix" list show them in full.
+- **Symbols**: Terminals that cannot print ✓ ⚠ ✗ — fall back to `ok ! X -`. A few terminals render ⚠ as a wide emoji, which shifts that row's alignment by one column.
+- **Exit codes**: `UNVERIFIED` rows (no DOI/PMID) are warnings: they make `scan` exit `1` only with `--strict`.
+- **HTML report**: A static snapshot; re-run `ref-verify` to refresh it. Expanding rows needs JavaScript (printing shows every row's details). It contains your reference text, so share it as you would the manuscript.
 
 ---
 

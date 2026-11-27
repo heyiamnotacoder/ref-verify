@@ -13,6 +13,8 @@ Verify every scientific reference and quantitative claim against live primary-so
    - Single citation or specific claim: `ref-verify check --doi ... --pmid ... --title ... --author ... --year ... --journal ... --claim "..."`
    - Pass `--fulltext` when a quantitative claim cites subgroup or secondary figures absent from the abstract (fetches Open Access JATS XML from NCBI PMC with Europe PMC fallback when a PMCID is available).
    - For `batch` and `scan`, `ref-verify` automatically batches API lookups and runs verification concurrently (tune with `--workers <n>`, default `8`).
+   - `scan` parses the cited title, first author, year, and journal from Vancouver/NLM or APA bibliography entries, so a scanned file is checked field by field; unparseable entries are checked by identifier only.
+   - Human-readable `batch`/`scan` output ends with a `CITATION CHECKLIST` table (✓ pass, ⚠ warning, ✗ fail, — not checked) and a `WHAT TO FIX` list. When the user wants a shareable report, add `--html <report.html>` and hand them that file.
 
 2. **Triage every diagnostic code by severity.**
    - **`CRITICAL` (`RETRACTED_PAPER`, `PMID_DOI_CONFLICT`)**: Stop and resolve immediately. Remove retracted sources from supporting evidence (or label them explicitly as retracted if discussing the retraction). For conflicts, confirm which paper is intended and replace the mismatched identifier.
