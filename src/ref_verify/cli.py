@@ -26,12 +26,14 @@ from ref_verify.report import (
     result_to_dict,
     status_counts,
 )
+from ref_verify.resolve import resolve_citations
 from ref_verify.scan import (
     ScanError,
     build_unlinked_bibliography_diagnostic,
     extract_citations_from_segments,
     extract_text_segments,
     extract_unlinked_bibliography_entries,
+    split_searchable_entries,
 )
 from ref_verify.table import ASCII_SYMBOLS, UNICODE_SYMBOLS, Symbols, format_checklist_table
 from ref_verify.verify import DEFAULT_WORKERS, verify_citation, verify_citations_batch
@@ -174,22 +176,27 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 2
 
     citations = extract_citations_from_segments(segments)
-    attach_citing_sentences(segments, citations)
-    unlinked_entries = extract_unlinked_bibliography_entries(segments)
+    searched, unlinked_entries = split_searchable_entries(extract_unlinked_bibliography_entries(segments))
     scan_diag = build_unlinked_bibliography_diagnostic(unlinked_entries)
     scan_diagnostics: list[Diagnostic] = [scan_diag] if scan_diag else []
 
     results: list[VerificationResult] = []
-    if citations:
-        for cit in citations:
-            cit.fulltext = args.fulltext
+    if citations or searched:
         with HttpClient(timeout=args.timeout) as http:
+            # Found identifiers must exist before citing sentences are keyed to their papers.
+            resolve_citations(searched, http, args.workers)
+            citations += searched
+            attach_citing_sentences(segments, citations)
+            for cit in citations:
+                cit.fulltext = args.fulltext
             results = verify_citations_batch(citations, http, max_workers=args.workers)
 
     if args.json:
         out: dict[str, Any] = {
             "file": str(path),
             "extracted_count": len(citations),
+            "searched_by_title_count": len(searched),
+            "resolved_by_search_count": sum(1 for c in searched if c.doi or c.pmid),
             "unlinked_bibliography_count": len(unlinked_entries),
             "unlinked_bibliography_entries": [asdict(e) for e in unlinked_entries],
             "scan_diagnostics": [asdict(d) for d in scan_diagnostics],
@@ -200,7 +207,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         _emit_json(out)
     else:
         if not citations:
-            print(f"SCAN: No DOIs or PMIDs found in '{path}'.")
+            print(f"SCAN: No DOIs, PMIDs, or searchable references found in '{path}'.")
         else:
             print(f"SCAN FILE: {path}  |  EXTRACTED REFERENCES: {len(citations)}")
             _print_results(results, show_abstract=not args.no_abstract)

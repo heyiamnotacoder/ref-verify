@@ -443,12 +443,12 @@ def unlinked_entry_diagnostic(entry: UnlinkedEntry) -> Diagnostic:
     return Diagnostic(
         code="UNLINKED_BIBLIOGRAPHY_ENTRIES",
         severity="WARNING",
-        message="Bibliography entry has no DOI or PMID, so it was not verified.",
-        expected="A DOI or PMID in this reference entry",
+        message="Bibliography entry has no DOI or PMID and no title that could be searched, so it was not verified.",
+        expected="A DOI or PMID in this reference entry, or a Vancouver/APA entry with a parseable title",
         actual=f"{entry.location}: {truncate(entry.text, 160)}",
         details={"location": entry.location},
-        hint="Plain-text references are invisible to identifier-based verification.",
-        fix="Add the DOI or PMID to this entry, or verify it with `ref-verify batch`.",
+        hint="Only entries whose author/title/journal split is unambiguous are searched by title.",
+        fix="Add the DOI or PMID to this entry, or verify it with `ref-verify batch` using `title`/`author`/`year`.",
     )
 
 
@@ -467,6 +467,29 @@ def extract_unlinked_bibliography_entries(segments: Sequence[tuple[str, str]]) -
     return unlinked
 
 
+def split_searchable_entries(entries: Sequence[UnlinkedEntry]) -> tuple[list[CitationInput], list[UnlinkedEntry]]:
+    """(citations to find by search, entries left unverified): an entry is searchable once its title parses."""
+    searchable: list[CitationInput] = []
+    unsearchable: list[UnlinkedEntry] = []
+    for entry in entries:
+        ref = parse_reference(entry.text)
+        if not ref.title:
+            unsearchable.append(entry)
+            continue
+        searchable.append(
+            CitationInput(
+                title=ref.title,
+                author=ref.author,
+                year=ref.year,
+                journal=ref.journal,
+                label=entry.location,
+                location=entry.location,
+                reference_text=entry.text,
+            )
+        )
+    return searchable, unsearchable
+
+
 def build_unlinked_bibliography_diagnostic(entries: Sequence[UnlinkedEntry]) -> Diagnostic | None:
     if not entries:
         return None
@@ -476,12 +499,12 @@ def build_unlinked_bibliography_diagnostic(entries: Sequence[UnlinkedEntry]) -> 
         code="UNLINKED_BIBLIOGRAPHY_ENTRIES",
         severity="WARNING",
         message=(
-            f"Found {count} bibliography entr{'y' if count == 1 else 'ies'} without a DOI or PMID; "
-            f"`ref-verify scan` could not verify {'it' if count == 1 else 'them'} automatically."
+            f"Found {count} bibliography entr{'y' if count == 1 else 'ies'} without a DOI, PMID, or searchable "
+            f"title; `ref-verify scan` could not verify {'it' if count == 1 else 'them'} automatically."
         ),
         expected="Every journal reference includes a DOI or PMID (or is verified via `ref-verify batch`)",
         actual=f"{count} unlinked bibliography entries (first {len(previews)}: {previews})",
         details={"count": count, "locations": [e.location for e in entries]},
-        hint="Plain-text citations (e.g. Vancouver references without DOIs/PMIDs) are invisible to identifier-only scanning.",
+        hint="Entries without identifiers are searched by title only when their author/title split is unambiguous.",
         fix="Add DOIs/PMIDs to bibliography entries or export them to JSON and run `ref-verify batch <refs.json>`.",
     )

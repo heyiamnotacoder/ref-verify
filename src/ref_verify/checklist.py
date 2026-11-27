@@ -66,6 +66,7 @@ CHECKS: tuple[CheckSpec, ...] = (
                 "PMID_NOT_FOUND",
                 "PMID_DOI_CONFLICT",
                 "NO_IDENTIFIER_PROVIDED",
+                "IDENTIFIER_RESOLVED_BY_SEARCH",
                 "LOOKUP_ERROR",
                 "UNLINKED_BIBLIOGRAPHY_ENTRIES",
                 "DUPLICATE_REFERENCE",

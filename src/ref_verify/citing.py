@@ -88,7 +88,12 @@ class _ReferenceIndex:
         self._by_doi: dict[str, int] = {}
         self._by_pmid: dict[str, int] = {}
         self._by_author_year: dict[tuple[str, str], list[int]] = {}
+        self._by_entry: dict[tuple[str, str], int] = {}  # (location, text) of the entry a citation came from
         for i, c in enumerate(citations):
+            if not (c.doi or c.pmid):
+                continue  # no identity to ground claims against (an unresolved reference)
+            if c.location and c.reference_text:
+                self._by_entry.setdefault((c.location, c.reference_text), i)
             if c.doi:
                 self._by_doi.setdefault(c.doi.lower(), i)
             if c.pmid:
@@ -106,7 +111,7 @@ class _ReferenceIndex:
                 self._by_number.setdefault(number, []).append((entry.location, self._entry_citation(entry)))
 
     def _entry_citation(self, entry: BibliographyEntry) -> int | None:
-        """The citation an entry's DOI/PMID belongs to; a duplicated entry maps to the same citation."""
+        """The citation an entry's DOI/PMID (or found identifier) belongs to; a duplicate maps to the same one."""
         for m in SCAN_DOI_RE.finditer(entry.text):
             doi, _ = strip_unbalanced_closing(m.group(1))
             if (idx := self.doi(doi)) is not None:
@@ -114,7 +119,7 @@ class _ReferenceIndex:
         for m in SCAN_PMID_RE.finditer(entry.text):
             if (idx := self.pmid(m.group(1) or m.group(2))) is not None:
                 return idx
-        return None
+        return self._by_entry.get((entry.location, entry.text))  # an identifier found by search
 
     def number(self, n: int, location: str) -> tuple[bool, int | None]:
         """(is a known reference, its citation index or None when the entry has no DOI/PMID)."""

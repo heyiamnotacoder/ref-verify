@@ -257,7 +257,8 @@ def search_pubmed_by_title(http: HttpClient, title: str, retmax: int = 3) -> lis
     if not clean_q:
         return []
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(
-        {"db": "pubmed", "term": f"{clean_q}[Title]", "retmode": "json", "retmax": str(retmax)}
+        # Relevance, not PubMed's default newest-first: a landmark trial must not lose to later papers on it.
+        {"db": "pubmed", "term": f"{clean_q}[Title]", "retmode": "json", "retmax": str(retmax), "sort": "relevance"}
     )
     resp = http.get(url)
     if resp.status != 200:

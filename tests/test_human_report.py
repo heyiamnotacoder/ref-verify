@@ -396,7 +396,8 @@ class TestCliHumanReport(unittest.TestCase):
         md = (
             "# References\n"
             + VANCOUVER_DAPA
-            + "\n2. Ali F. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161.\n"
+            # No author initials, so author/title cannot be split: listed as UNVERIFIED, never searched.
+            + "\n2. World Health Organization. Global report on diabetes. Geneva: WHO; 2016.\n"
         )
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "paper.md"
