@@ -90,6 +90,29 @@ class TestReferenceParsing(unittest.TestCase):
         self.assertEqual((samuel.author, samuel.journal), ("Samuel C", "Dermatol Ther (Heidelb)"))
         self.assertTrue(samuel.title and samuel.title.startswith("A Review on the Safety"))
 
+    def test_no_mis_split_on_capitalised_words_or_short_authorless_sentences(self) -> None:
+        for text in (
+            "Antimicrobial resistance. Global burden of bacterial resistance in 2019. Lancet. 2022;1:2.",
+            "Smith J. Title part one here. Report of the Task Force 2019 Update: methods and results. J Hyp. 2020;1:2.",
+            "Smith J. Title part one here. Results of the trial (Phase III) 2019; 1:2.",
+        ):
+            ref = refparse.parse_reference(text)
+            self.assertNotIn(ref.journal, ("Report of the Task Force", "Results of the trial (Phase III)"), text)
+            if text.startswith("Antimicrobial"):
+                self.assertEqual((ref.author, ref.title), (None, None))
+
+    def test_first_authors_need_initials_but_may_be_non_ascii(self) -> None:
+        for text, author in (
+            ("Østergaard L, Smith J. Cerebral blood flow in sepsis. Crit Care. 2019;1:2.", "Østergaard L"),
+            (
+                "Gonzalez de la Fuente M, Lee K. Outcomes of early surgery. Ann Surg. 2018 Sep 1-15;2:3.",
+                "Gonzalez de la Fuente M",
+            ),
+        ):
+            ref = refparse.parse_reference(text)
+            self.assertEqual(ref.author, author)
+            self.assertIsNotNone(ref.title)
+
     def test_surname_particles_are_names(self) -> None:
         ref = refparse.parse_reference(
             "20.    van Geel MJ, Maatkamp M, Oostveen AM, et al. Comparison of the Dermatology Life Quality Index and "

@@ -29,15 +29,24 @@ _LOCATOR_RE = re.compile(
 _YEAR = r"(?:19|20)\d{2}"
 # Lowercase surname particles: "van Geel MJ", "de Bruin, A. B.", "von Kobyletzki L".
 _PARTICLES = r"(?:(?:van|von|de|der|den|di|da|du|del|della|le|la|dos|das|ten|ter)\s+)*"
+_CAP = "[A-ZÀ-ÖØ-Þ]"  # an uppercase letter, including accented and "Ø"
+_SURNAME = rf"{_PARTICLES}{_CAP}[\w'’\-]+(?:\s{_PARTICLES}{_CAP}[\w'’\-]+){{0,2}}"
+# Real month names only ("Jun", "June", "Sept.", seasons), optionally a range and a day or day range.
+_MONTH_NAME = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|"
+    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Spring|Summer|Autumn|Fall|Winter)\.?"
+)
+_DATE_TAIL = rf"(?:\s+{_MONTH_NAME}(?:-{_MONTH_NAME})?(?:\s+\d{{1,2}}(?:-\d{{1,2}})?)?)?"
+# A one-word place qualifier on a journal abbreviation: "Dermatol Ther (Heidelb)", "Br J Hosp Med (Lond)".
+_JOURNAL_QUALIFIER = r"(?:\s\([A-Z][a-z]{1,12}\))?"
 
 # Vancouver/NLM: "Authors. Title. Journal. 2019 Nov 21;381(21):1995-2008."  (Lancet style drops the period
 # after the journal.) Neither the author block nor the title may contain a period, so a split is never guessed.
 _VANCOUVER_RE = re.compile(
     rf"^(?P<authors>[^.]+?)\.\s+(?P<title>[^.?!]+[.?!])\s+"
-    # journal may end in a parenthesised place qualifier: "Dermatol Ther (Heidelb)"
-    rf"(?P<journal>[A-Z][^.;:()]*?(?:\s\([A-Z][A-Za-z ]{{1,20}}\))?)\.?\s+"
-    # "2019", "2019 Nov", "2020 June 9", "2017 Jun-Jul"
-    rf"(?P<year>{_YEAR})(?:\s+[A-Z][a-z]{{2,8}}\.?(?:-[A-Z][a-z]{{2,8}})?(?:\s+\d{{1,2}})?)?\s*(?:[;:]|$)"
+    rf"(?P<journal>[A-Z][^.;:()]*?{_JOURNAL_QUALIFIER})\.?\s+"
+    # "2019", "2019 Nov", "2020 June 9", "2017 Jun-Jul", "2018 Sep 1-15"
+    rf"(?P<year>{_YEAR}){_DATE_TAIL}\s*(?:[;:]|$)"
 )
 # APA: "Surname, A. A., & Surname, B. (2019). Title. Journal, 381(21), 1995-2008."
 _APA_HEAD_RE = re.compile(
@@ -49,8 +58,9 @@ _MD_EMPHASIS_RE = re.compile(r"(\*\*|\*|__)(?=\S)(.+?)(?<=\S)\1")
 # Vancouver medium/language tags ("[Internet]", "[Article in Chinese]") and bracketed translated titles.
 _BRACKET_TAG_RE = re.compile(r"\s*\[[^\]]*\]")
 _ET_AL_RE = re.compile(r"\s*,?\s*\bet\s+al\b\.?$", flags=re.IGNORECASE)
-_VANCOUVER_NAME_RE = re.compile(rf"^{_PARTICLES}[A-Z][\w'\-]+(?:\s[A-Z]?[\w'\-]+){{0,2}}(?:\s[A-Z]{{1,4}})?$")
-_APA_SURNAME_RE = re.compile(rf"^{_PARTICLES}[A-Z][\w'\-]+(?:\s[A-Z]?[\w'\-]+){{0,2}}$")
+# Vancouver first authors always carry initials ("McMurray JJV"); a short title sentence never does.
+_VANCOUVER_NAME_RE = re.compile(rf"^{_SURNAME}\s{_CAP}{{1,4}}$")
+_APA_SURNAME_RE = re.compile(rf"^{_SURNAME}$")
 _MIN_TITLE_WORDS = 3
 
 
