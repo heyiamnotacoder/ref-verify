@@ -38,6 +38,9 @@ _VANCOUVER_RE = re.compile(
 _APA_HEAD_RE = re.compile(rf"^(?P<authors>[A-Z][^()]*?)\s*\((?P<year>{_YEAR})[a-z]?(?:,[^)]*)?\)\.?\s*(?P<rest>.*)$")
 _APA_REST_RE = re.compile(r"^(?P<title>[^.?!]+[.?!])\s+(?P<journal>[A-Z][^,.]*?),\s*\d")
 
+_MD_EMPHASIS_RE = re.compile(r"(\*\*|\*|__)(?=\S)(.+?)(?<=\S)\1")
+# Vancouver medium/language tags ("[Internet]", "[Article in Chinese]") and bracketed translated titles.
+_BRACKET_TAG_RE = re.compile(r"\s*\[[^\]]*\]")
 _ET_AL_RE = re.compile(r"\s*,?\s*\bet\s+al\b\.?$", flags=re.IGNORECASE)
 _VANCOUVER_NAME_RE = re.compile(r"^[A-Z][\w'\-]+(?:\s[A-Z]?[\w'\-]+){0,2}(?:\s[A-Z]{1,4})?$")
 _APA_SURNAME_RE = re.compile(r"^[A-Z][\w'\-]+(?:\s[A-Z]?[\w'\-]+){0,2}$")
@@ -45,7 +48,7 @@ _MIN_TITLE_WORDS = 3
 
 
 def _bibliographic_text(text: str) -> str:
-    body = _NUMBERING_RE.sub("", normalize_text(text), count=1)
+    body = _MD_EMPHASIS_RE.sub(r"\2", _NUMBERING_RE.sub("", normalize_text(text), count=1))
     m = _LOCATOR_RE.search(body)
     if m:
         body = body[: m.start()]
@@ -53,12 +56,12 @@ def _bibliographic_text(text: str) -> str:
 
 
 def _clean_title(raw: str) -> str | None:
-    title = raw.strip().rstrip(".").strip()
+    title = _BRACKET_TAG_RE.sub("", raw).strip().rstrip(".").strip()
     return title if len(title.split()) >= _MIN_TITLE_WORDS else None
 
 
 def _clean_journal(raw: str) -> str | None:
-    journal = raw.strip().rstrip(".").strip()
+    journal = _BRACKET_TAG_RE.sub("", raw).strip().rstrip(".").strip()
     if not (2 <= len(journal) <= 80) or journal.isdigit():
         return None
     return journal

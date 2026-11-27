@@ -134,7 +134,7 @@ CITATION CHECKLIST  (6 references: 1 pass, 1 warn, 3 fail, 1 unverified)
 5  line 9   10.1136/bmj.n99999999           ✗          —         —      —      —       —       —    FAIL
 6  line 10  6. Ali F, Vyas J, Finlay...     ⚠          —         —      —      —       —       —    UNVERIFIED
 ----------------------------------------------------------------------------------------------------------
-✓ pass   ⚠ warning   ✗ fail   i note   — not checked (no cited value to compare)
+✓ pass   ⚠ warning   ✗ fail   i note   — not checked (no value to compare, or the paper did not resolve)
 
 WHAT TO FIX:
   [2] line 6 | Zinman 2015, 10.1056/NEJMoa1504720
@@ -143,7 +143,8 @@ WHAT TO FIX:
   ...
 ```
 
-- **—** means the check did not run (for example, no cited year was given, or the official record has no journal). A ✓ always means the value was compared and matched.
+- **—** means the check did not run (no cited year was given, the official record has no journal, or the DOI/PMID did not resolve). A ✓ always means the value was compared and matched.
+- A numbered reference wrapped over several lines is read as one entry, and a paper cited in the body and again in the References list is one row, pointing at the reference entry.
 - **UNVERIFIED** rows are bibliography entries with no DOI or PMID; add an identifier or verify them with `batch`.
 - Ticks fall back to ASCII (`ok ! X -`) when the terminal encoding cannot show them; colour is used only on a TTY and honours `NO_COLOR`.
 - `--html <path>` writes the same checklist as a standalone page (no external assets) with summary counts, a "Needs attention" filter, clickable DOI/PubMed links, and per-row details (cited-as text, official record, and every diagnostic with its fix).
@@ -162,7 +163,7 @@ WHAT TO FIX:
 
 - **Exit `0`**: Pass (or warning without `--strict`).
 - **Exit `1`**: Fail (any `CRITICAL`/`ERROR`, or `WARNING` with `--strict`).
-- **Exit `2`**: Invalid arguments, malformed JSON, or unreadable input file.
+- **Exit `2`**: Invalid arguments, malformed JSON, unreadable input file, or an `--html` path that cannot be written.
 
 ---
 

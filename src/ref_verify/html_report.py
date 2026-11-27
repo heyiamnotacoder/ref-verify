@@ -7,13 +7,17 @@ from collections.abc import Sequence
 from html import escape
 from urllib.parse import quote
 
-from ref_verify.checklist import CHECKS, FAIL, INFO, PASS, SKIP, UNVERIFIED, WARN, ChecklistRow
+from ref_verify.checklist import (
+    CHECKS,
+    VERDICT_LABELS,
+    ChecklistRow,
+    severity_verdict,
+    status_counts,
+    status_verdict,
+)
 from ref_verify.models import Diagnostic, PaperRecord
+from ref_verify.table import UNICODE_SYMBOLS, legend
 
-_GLYPH = {PASS: "✓", INFO: "i", WARN: "⚠", FAIL: "✗", SKIP: "—"}
-_VERDICT_WORD = {PASS: "Pass", INFO: "Note", WARN: "Warning", FAIL: "Fail", SKIP: "Not checked"}
-_STATUS_CLASS = {"PASS": PASS, "WARN": WARN, "FAIL": FAIL, UNVERIFIED: WARN}
-_SEVERITY_CLASS = {"CRITICAL": FAIL, "ERROR": FAIL, "WARNING": WARN, "INFO": INFO}
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 
 _CSS = """
@@ -96,10 +100,7 @@ def _pmid_link(pmid: str | None) -> str:
 
 
 def _identifier_html(row: ChecklistRow) -> str:
-    if row.result is None:
-        return escape(row.identifier)
-    cit = row.result.input
-    parts = [p for p in (_doi_link(cit.doi) if cit.doi else "", _pmid_link(cit.pmid) if cit.pmid else "") if p]
+    parts = [p for p in (_doi_link(row.doi) if row.doi else "", _pmid_link(row.pmid) if row.pmid else "") if p]
     return " · ".join(parts) or escape(row.identifier)
 
 
@@ -121,7 +122,7 @@ def _official_block(rec: PaperRecord) -> str:
 
 
 def _problem_html(label: str, d: Diagnostic) -> str:
-    cls = _SEVERITY_CLASS.get(d.severity, FAIL)
+    cls = severity_verdict(d.severity)
     parts = [f"<div><strong>{escape(label)}</strong> — {escape(d.message)} <code>{escape(d.code)}</code></div>"]
     if d.expected:
         parts.append(f"<div>Expected: {escape(d.expected)}</div>")
@@ -162,12 +163,12 @@ def _row_html(row: ChecklistRow) -> str:
     ]
     for spec in CHECKS:
         cell = row.cells[spec.key]
-        tip = "; ".join(d.message for d in cell.diagnostics) or _VERDICT_WORD[cell.verdict]
+        tip = "; ".join(d.message for d in cell.diagnostics) or VERDICT_LABELS[cell.verdict]
         cells.append(
             f'<td class="c"><span class="v {cell.verdict}" title="{escape(spec.header)}: {escape(tip)}" '
-            f'aria-label="{escape(spec.header)}: {_VERDICT_WORD[cell.verdict]}">{_GLYPH[cell.verdict]}</span></td>'
+            f'aria-label="{escape(spec.header)}: {VERDICT_LABELS[cell.verdict]}">{UNICODE_SYMBOLS.for_verdict(cell.verdict)}</span></td>'
         )
-    status_cls = _STATUS_CLASS.get(row.status, FAIL)
+    status_cls = status_verdict(row.status)
     cells.append(f'<td><span class="status {status_cls}">{escape(row.status)}</span></td>')
     span = len(CHECKS) + 4
     return (
@@ -177,15 +178,13 @@ def _row_html(row: ChecklistRow) -> str:
 
 
 def render_html_report(rows: Sequence[ChecklistRow], *, source: str | None = None, generated: str = "") -> str:
-    statuses = [r.status for r in rows]
     chips = [f'<span class="chip">{len(rows)} references</span>']
-    for status, cls in (("PASS", PASS), ("WARN", WARN), ("FAIL", FAIL), (UNVERIFIED, WARN)):
-        if status in statuses:
-            chips.append(f'<span class="chip {cls}">{statuses.count(status)} {status.lower()}</span>')
+    chips += [
+        f'<span class="chip {status_verdict(status)}">{n} {status.lower()}</span>' for status, n in status_counts(rows)
+    ]
     meta = " · ".join(escape(p) for p in (source or "", f"Generated {generated}" if generated else "") if p)
     headers = "".join(f'<th class="c" title="{escape(spec.description)}">{escape(spec.header)}</th>' for spec in CHECKS)
     body = "".join(_row_html(r) for r in rows) or f'<tr><td colspan="{len(CHECKS) + 4}">No references found.</td></tr>'
-    legend = "✓ pass · ⚠ warning · ✗ fail · i note · — not checked (no cited value to compare)"
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -194,7 +193,7 @@ def render_html_report(rows: Sequence[ChecklistRow], *, source: str | None = Non
         f'<div class="chips">{"".join(chips)}</div>'
         '<div class="toolbar"><button data-filter="all" aria-pressed="true">All</button>'
         '<button data-filter="problems" aria-pressed="false">Needs attention</button>'
-        f'<span class="legend">{legend} — click a row for details</span></div>'
+        f'<span class="legend">{escape(legend(UNICODE_SYMBOLS, " · "))}. Click a row for details.</span></div>'
         '<div class="wrap"><table><thead><tr><th>#</th><th>Where</th><th>Reference</th>'
         f"{headers}<th>Result</th></tr></thead><tbody>{body}</tbody></table></div>"
         f"<script>{_JS}</script></main></body></html>"

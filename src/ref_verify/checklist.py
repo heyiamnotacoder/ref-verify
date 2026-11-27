@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from ref_verify.metadata import checked_metadata_fields
 from ref_verify.models import Diagnostic, UnlinkedEntry, VerificationResult
+from ref_verify.scan import unlinked_entry_diagnostic
 
 PASS = "pass"
 INFO = "info"
@@ -20,8 +21,28 @@ SKIP = "skip"
 
 UNVERIFIED = "UNVERIFIED"  # row status for a bibliography entry that carries no DOI/PMID
 
+VERDICT_LABELS = {
+    PASS: "pass",
+    WARN: "warning",
+    FAIL: "fail",
+    INFO: "note",
+    SKIP: "not checked (no value to compare, or the paper did not resolve)",
+}
+
 _SEVERITY_VERDICT = {"CRITICAL": FAIL, "ERROR": FAIL, "WARNING": WARN, "INFO": INFO}
+_STATUS_VERDICT = {"PASS": PASS, "WARN": WARN, "FAIL": FAIL, UNVERIFIED: WARN}
+_STATUS_ORDER = ("PASS", "WARN", "FAIL", UNVERIFIED)
 _VERDICT_RANK = {PASS: 0, INFO: 1, WARN: 2, FAIL: 3}
+
+
+def severity_verdict(severity: str) -> str:
+    """Verdict a diagnostic severity maps to; unknown severities fail closed."""
+    return _SEVERITY_VERDICT.get(severity, FAIL)
+
+
+def status_verdict(status: str) -> str:
+    """Verdict colour for a row status; unknown statuses fail closed."""
+    return _STATUS_VERDICT.get(status, FAIL)
 
 
 @dataclass(frozen=True)
@@ -83,11 +104,14 @@ class CheckCell:
 class ChecklistRow:
     index: int
     status: str  # PASS | WARN | FAIL | UNVERIFIED
-    identifier: str
+    identifier: str  # DOI, PMID:n, or the entry text for unlinked rows
     paper: str  # e.g. "McMurray 2019" once resolved, else ""
     location: str
     cells: Mapping[str, CheckCell]
-    extra: tuple[Diagnostic, ...] = ()  # diagnostics outside every column (none today; kept fail-safe)
+    # Codes no column claims are listed under "Other", never dropped (the code-coverage test keeps this empty).
+    extra: tuple[Diagnostic, ...] = ()
+    doi: str | None = None
+    pmid: str | None = None
     result: VerificationResult | None = None
     unlinked: UnlinkedEntry | None = None
     reference_text: str = field(default="")
@@ -102,7 +126,7 @@ class ChecklistRow:
 
 
 def _worst(diags: Sequence[Diagnostic]) -> str:
-    return max((_SEVERITY_VERDICT.get(d.severity, FAIL) for d in diags), key=_VERDICT_RANK.__getitem__)
+    return max((severity_verdict(d.severity) for d in diags), key=_VERDICT_RANK.__getitem__)
 
 
 def _applicable_checks(res: VerificationResult) -> set[str]:
@@ -163,19 +187,15 @@ def build_row(index: int, res: VerificationResult) -> ChecklistRow:
         location=res.input.location or res.input.label or "",
         cells=cells,
         extra=tuple(extra),
+        doi=res.input.doi,
+        pmid=res.input.pmid,
         result=res,
         reference_text=res.input.reference_text or "",
     )
 
 
 def build_unlinked_row(index: int, entry: UnlinkedEntry) -> ChecklistRow:
-    diag = Diagnostic(
-        code="UNLINKED_BIBLIOGRAPHY_ENTRIES",
-        severity="WARNING",
-        message="Bibliography entry has no DOI or PMID, so it was not verified.",
-        hint="Plain-text references are invisible to identifier-based verification.",
-        fix="Add the DOI or PMID to this entry, or verify it with `ref-verify batch`.",
-    )
+    diag = unlinked_entry_diagnostic(entry)
     cells = {spec.key: CheckCell(SKIP) for spec in CHECKS}
     cells["identifier"] = CheckCell(WARN, (diag,))
     return ChecklistRow(
@@ -197,3 +217,9 @@ def build_checklist(
     rows = [build_row(i, res) for i, res in enumerate(results, start=1)]
     rows.extend(build_unlinked_row(len(rows) + i, e) for i, e in enumerate(unlinked, start=1))
     return rows
+
+
+def status_counts(rows: Sequence[ChecklistRow]) -> list[tuple[str, int]]:
+    """Non-zero row counts per status, in PASS, WARN, FAIL, UNVERIFIED order."""
+    statuses = [r.status for r in rows]
+    return [(s, statuses.count(s)) for s in _STATUS_ORDER if s in statuses]

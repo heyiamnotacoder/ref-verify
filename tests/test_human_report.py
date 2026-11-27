@@ -87,8 +87,52 @@ class TestReferenceParsing(unittest.TestCase):
             self.assertIsNone(ref.journal, text)
         self.assertEqual(refparse.parse_reference("See doi:10.1056/NEJMoa1911303"), refparse.ParsedReference())
 
+    def test_markdown_emphasis_and_vancouver_bracket_tags_are_ignored(self) -> None:
+        ref = refparse.parse_reference(
+            "1. McMurray JJV, et al. Dapagliflozin in Patients with Heart Failure [Internet]. "
+            "*N Engl J Med*. 2019;381(21):1995-2008."
+        )
+        self.assertEqual(ref.title, "Dapagliflozin in Patients with Heart Failure")
+        self.assertEqual(ref.journal, "N Engl J Med")
+        translated = refparse.parse_reference("2. Li X. [Effect of drug X in rats]. Zhonghua Yi Xue Za Zhi. 2019;1:2.")
+        self.assertIsNone(translated.title)
+
 
 class TestScanFillsCitedMetadata(unittest.TestCase):
+    def test_wrapped_reference_is_one_entry_not_phantom_rows(self) -> None:
+        segments = [
+            ("line 1", "## References"),
+            ("line 2", "1. McMurray JJV, Solomon SD, Inzucchi SE, et al. Dapagliflozin in Patients with Heart"),
+            ("line 3", "Failure and Reduced Ejection Fraction. N Engl J Med. 2019;381(21):1995-2008."),
+            ("line 4", "doi:10.1056/NEJMoa1911303"),
+            ("line 5", "2. Ali F, Vyas J, Finlay AY. Counting the Burden. Acta Derm Venereol. 2020;100(12):adv00161."),
+        ]
+        (cit,) = scan.extract_citations_from_segments(segments)
+        self.assertEqual(cit.location, "line 2")
+        self.assertEqual(cit.journal, "N Engl J Med")
+        self.assertEqual(cit.title, "Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction")
+        unlinked = scan.extract_unlinked_bibliography_entries(segments)
+        self.assertEqual([u.location for u in unlinked], ["line 5"])
+
+    def test_one_paper_is_one_row_however_its_ids_are_spread(self) -> None:
+        far_apart = VANCOUVER_DAPA.replace("doi:", "Some trailing commentary " * 8 + "doi:") + " PMID: 31535829"
+        body_then_bib = [
+            ("line 1", "SGLT2 inhibitors reduce events (doi:10.1056/NEJMoa1911303)."),
+            ("line 2", "## References"),
+            ("line 3", VANCOUVER_DAPA + " PMID: 31535829"),
+        ]
+        for segments in ([("line 1", "## References"), ("line 2", far_apart)], body_then_bib):
+            cits = scan.extract_citations_from_segments(segments)
+            self.assertEqual([(c.doi, c.pmid) for c in cits], [("10.1056/NEJMoa1911303", "31535829")])
+            self.assertEqual(cits[0].journal, "N Engl J Med")
+
+    def test_unlinked_entry_diagnostic_pinpoints_the_entry(self) -> None:
+        entry = models.UnlinkedEntry(location="line 9", text="1. Ali F. Counting the Burden. Acta Derm Venereol. 2020.")
+        diag = scan.unlinked_entry_diagnostic(entry)
+        self.assertEqual((diag.code, diag.severity), ("UNLINKED_BIBLIOGRAPHY_ENTRIES", "WARNING"))
+        self.assertTrue(diag.expected and diag.actual and diag.fix)
+        self.assertIn("Ali F", diag.actual)
+
     def test_bibliography_entries_are_parsed_but_body_mentions_are_not(self) -> None:
         segments = [
             ("line 1", "Dapagliflozin helps (doi:10.1016/S0140-6736(20)31180-6)."),

@@ -6,7 +6,20 @@ import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ref_verify.checklist import CHECKS, FAIL, INFO, PASS, SKIP, UNVERIFIED, WARN, ChecklistRow
+from ref_verify.checklist import (
+    CHECKS,
+    FAIL,
+    INFO,
+    PASS,
+    SKIP,
+    UNVERIFIED,
+    VERDICT_LABELS,
+    WARN,
+    ChecklistRow,
+    severity_verdict,
+    status_counts,
+    status_verdict,
+)
 from ref_verify.text import truncate
 
 
@@ -26,10 +39,13 @@ UNICODE_SYMBOLS = Symbols(passed="✓", info="i", warn="⚠", fail="✗", skip="
 ASCII_SYMBOLS = Symbols(passed="ok", info="i", warn="!", fail="X", skip="-")
 
 _ANSI = {PASS: "32", INFO: "36", WARN: "33", FAIL: "31", SKIP: "2"}
-_STATUS_VERDICT = {"PASS": PASS, "WARN": WARN, "FAIL": FAIL, UNVERIFIED: WARN}
-_SEVERITY_VERDICT = {"CRITICAL": FAIL, "ERROR": FAIL, "WARNING": WARN, "INFO": INFO}
 _GAP = "  "
 _STATUS_WIDTH = len(UNVERIFIED)
+
+
+def legend(symbols: Symbols, sep: str = "   ") -> str:
+    order = (PASS, WARN, FAIL, INFO, SKIP)
+    return sep.join(f"{symbols.for_verdict(v)} {VERDICT_LABELS[v]}" for v in order)
 
 
 def _paint(text: str, verdict: str, color: bool) -> str:
@@ -56,10 +72,8 @@ def _column_widths(rows: Sequence[ChecklistRow], width: int) -> tuple[int, int, 
 
 
 def _counts_line(rows: Sequence[ChecklistRow]) -> str:
-    statuses = [r.status for r in rows]
-    parts = [f"{statuses.count(s)} {s.lower()}" for s in ("PASS", "WARN", "FAIL", UNVERIFIED) if s in statuses]
     noun = "reference" if len(rows) == 1 else "references"
-    return f"{len(rows)} {noun}: " + ", ".join(parts)
+    return f"{len(rows)} {noun}: " + ", ".join(f"{n} {status.lower()}" for status, n in status_counts(rows))
 
 
 def _problems_block(rows: Sequence[ChecklistRow], symbols: Symbols, color: bool, width: int) -> list[str]:
@@ -73,7 +87,7 @@ def _problems_block(rows: Sequence[ChecklistRow], symbols: Symbols, color: bool,
         if row.reference_text and row.unlinked is None:
             lines.append(f"      Cited as: {truncate(row.reference_text, width - 16)}")
         for spec, diag in problems:
-            verdict = _SEVERITY_VERDICT.get(diag.severity, FAIL)
+            verdict = severity_verdict(diag.severity)
             label = spec.header if spec else "Other"
             mark = _paint(symbols.for_verdict(verdict), verdict, color)
             wrapped = textwrap.wrap(f"{label}: {diag.code}: {diag.message}", body_w) or [""]
@@ -111,15 +125,10 @@ def format_checklist_table(
         for spec in CHECKS:
             verdict = row.cells[spec.key].verdict
             cells.append(_paint(symbols.for_verdict(verdict).center(len(spec.header)), verdict, color))
-        status_verdict = _STATUS_VERDICT.get(row.status, FAIL)
-        cells.append(_paint(row.status, status_verdict, color))
+        cells.append(_paint(row.status, status_verdict(row.status), color))
         out.append(_GAP.join(cells).rstrip())
 
-    legend = (
-        f"{symbols.passed} pass   {symbols.warn} warning   {symbols.fail} fail   "
-        f"{symbols.info} note   {symbols.skip} not checked (no cited value to compare)"
-    )
-    out += ["-" * len(header), legend]
+    out += ["-" * len(header), *textwrap.wrap(legend(symbols), width, subsequent_indent="  ")]
 
     problems = _problems_block(rows, symbols, color, width)
     if problems:
