@@ -717,6 +717,32 @@ class TestCohortClauseAttribution(unittest.TestCase):
             ["Death fell (3.7%, vs. 5.9% in placebo).", "McMurray et al. 2019 agreed.", "Next one."],
         )
 
+    def test_sentence_split_edge_cases(self) -> None:
+        # An unclosed "(" must not swallow the rest of a one-line abstract section.
+        self.assertEqual(
+            quant.split_sentences("Mortality fell (HR 0.74 [95% CI 0.65-0.85. The next sentence. Another one."),
+            ["Mortality fell (HR 0.74 [95% CI 0.65-0.85.", "The next sentence.", "Another one."],
+        )
+        # "resp." and lowercase "no." end sentences.
+        self.assertEqual(
+            quant.split_sentences("Rates were 5% and 7% resp. The HR was 0.74. It was trial no. Then it ended."),
+            ["Rates were 5% and 7% resp.", "The HR was 0.74.", "It was trial no.", "Then it ended."],
+        )
+
+    def test_conditions_named_as_populations_are_still_qualifiers(self) -> None:
+        rec = models.PaperRecord(
+            title="Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction",
+            abstract=(
+                "METHODS: We randomly assigned 4744 patients with heart failure and an ejection fraction of 40% or "
+                "less. RESULTS: The primary outcome occurred less often with dapagliflozin (hazard ratio, 0.74)."
+            ),
+        )
+        for claim in (
+            "Dapagliflozin is approved for HFpEF (HR 0.74).",
+            "In patients hospitalized for HFpEF, dapagliflozin lowered events (HR 0.74).",
+        ):
+            self.assertIsNotNone(cohort.check_claim_cohort(claim, rec, ["HR 0.74"]), claim)
+
     def test_outcome_next_to_a_subgroup_name_is_not_a_subgroup(self) -> None:
         rec = models.PaperRecord(
             title="Empagliflozin, Cardiovascular Outcomes, and Mortality in Type 2 Diabetes", abstract=EMPA_REG_RESULTS

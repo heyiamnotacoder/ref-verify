@@ -85,7 +85,7 @@ def truncate(text: str, max_len: int) -> str:
 
 # Abbreviations whose period never ends a sentence ("et al.", "vs.", "Fig.", "e.g.").
 _ABBREVIATION_END_RE = re.compile(
-    r"(?:\bet al|\be\.g|\bi\.e|\bvs|\bFigs?|\bRefs?|\bapprox|\bcf|\bDr|\bNo|\bVol|\bca|\bresp)\.$", re.IGNORECASE
+    r"(?:\bet al|\be\.g|\bi\.e|\bvs|\bFigs?|\bRefs?|\bapprox|\bcf|\bDr|\bNo|\bVol|\bca)\.$"
 )
 
 

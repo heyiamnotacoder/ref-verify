@@ -236,10 +236,17 @@ _COHORT_KNOWN_COND_RE = re.compile(
 
 
 # "hospitalization for heart failure", "admission for COPD": an outcome named after a condition, not a population.
+# CLAIM_COHORT_MISMATCH ``details["reason"]`` values. The first two mean the claim itself names a
+# population the source contradicts; the last two mean the claim omits the source's subgroup.
+REASON_COHORT_CONFLICT = "cohort_conflict"
+REASON_COHORT_NOT_IN_SOURCE = "cohort_not_in_source_context"
+REASON_SUBGROUP_AS_OVERALL = "subgroup_attributed_to_overall"
+REASON_SUBGROUP_OMITTED = "subgroup_qualifier_omitted"
+NAMED_POPULATION_REASONS = frozenset({REASON_COHORT_CONFLICT, REASON_COHORT_NOT_IN_SOURCE})
+
+# Only outcome *nouns*: "patients hospitalized for HFpEF" or "approved for CKD" still name a population.
 _OUTCOME_BEFORE_FOR_RE = re.compile(
-    r"\b(?:hospitali[sz]ations?|(?:re)?admissions?|(?:ed\s+)?visits?|deaths?|mortality|events?|risk|"
-    r"treatment|therapy|indicated|approved|admitted|hospitali[sz]ed)\s*$",
-    re.IGNORECASE,
+    r"\b(?:hospitali[sz]ations?|(?:re)?admissions?|visits?|deaths?|mortality|events?)\s*$", re.IGNORECASE
 )
 
 
@@ -1080,18 +1087,18 @@ def check_claim_cohort(
             sg_labels = tuple(dict.fromkeys(sq.raw for c in hits for sq in c.qualifiers)) or ("subgroup",)
             sg_texts = tuple(dict.fromkeys(c.text for c in hits))
             if has_explicit_conflict or claim_qualifiers:
-                reason = "cohort_conflict"
+                reason = REASON_COHORT_CONFLICT
             elif claim_asserts_overall and not claim_mentions_subgroup:
-                reason = "subgroup_attributed_to_overall"
+                reason = REASON_SUBGROUP_AS_OVERALL
             else:
-                reason = "subgroup_qualifier_omitted"
+                reason = REASON_SUBGROUP_OMITTED
             subgroup_only_issues.append(SubgroupIssue(reason, tok, sg_labels, sg_texts))
 
     if subgroup_only_issues:
         reason_priority = {
-            "cohort_conflict": 0,
-            "subgroup_attributed_to_overall": 1,
-            "subgroup_qualifier_omitted": 2,
+            REASON_COHORT_CONFLICT: 0,
+            REASON_SUBGROUP_AS_OVERALL: 1,
+            REASON_SUBGROUP_OMITTED: 2,
         }
         subgroup_only_issues.sort(key=lambda issue: reason_priority.get(issue.reason, 9))
         top_reason = subgroup_only_issues[0].reason
@@ -1102,12 +1109,12 @@ def check_claim_cohort(
             ["overall"] if claim_asserts_overall else ["unqualified/overall"]
         )
 
-        if top_reason == "cohort_conflict":
+        if top_reason == REASON_COHORT_CONFLICT:
             msg = (
                 f"Matched number(s) [{', '.join(bad_tokens)}] appear in a different cohort/subgroup "
                 f"in the source text ({', '.join(source_cohorts)}) than claimed ({', '.join(claim_cohort_labels)})."
             )
-        elif top_reason == "subgroup_attributed_to_overall":
+        elif top_reason == REASON_SUBGROUP_AS_OVERALL:
             msg = (
                 f"Matched number(s) [{', '.join(bad_tokens)}] only appear in a subgroup "
                 f"({', '.join(source_cohorts)}) in the source text, not the claimed overall cohort."
@@ -1182,7 +1189,7 @@ def check_claim_cohort(
                 expected=f"claim_cohort={[q.raw for q in claim_qualifiers]}",
                 actual=f'unsupported_cohorts={unsupported_cohorts}; clause="{truncate(sample_clause, 260)}"',
                 details={
-                    "reason": "cohort_not_in_source_context",
+                    "reason": REASON_COHORT_NOT_IN_SOURCE,
                     "matched_numbers": mismatched_tokens,
                     "claim_cohorts": [q.raw for q in claim_qualifiers],
                     "unsupported_cohorts": unsupported_cohorts,

@@ -196,6 +196,7 @@ def extract_claim_keywords(claim: str) -> list[str]:
     return keywords[:15]
 
 
+_PAREN_LOOKAHEAD = 200
 _SENTENCE_GAP_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(])")
 
 
@@ -209,8 +210,11 @@ def split_sentences(text: str) -> list[str]:
         start = 0
         for m in _SENTENCE_GAP_RE.finditer(line):
             head = line[start : m.start()]
-            # Never end a sentence at "vs." / "et al." or inside an open parenthesis ("(3.7%, vs. 5.9%; ...)").
-            if ends_with_abbreviation(head) or head.count("(") > head.count(")"):
+            # Never end a sentence at "vs." / "et al." or inside a parenthesis that closes soon after
+            # ("(3.7%, vs. 5.9%; ...)"); an unclosed "(" must not swallow the rest of the line.
+            if ends_with_abbreviation(head) or (
+                head.count("(") > head.count(")") and ")" in line[m.end() : m.end() + _PAREN_LOOKAHEAD]
+            ):
                 continue
             if head.strip():
                 parts.append(head.strip())
