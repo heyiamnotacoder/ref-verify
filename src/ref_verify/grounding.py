@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 from ref_verify.claims import evaluate_claim
+from ref_verify.cohort import NAMED_POPULATION_REASONS
 from ref_verify.models import (
     SEVERITY_ORDER,
     CitingSentence,
@@ -31,6 +32,7 @@ _RATIO_RE = re.compile(
     r"\b(hazard ratio|HR|relative risk|risk ratio|RR|rate ratio|odds ratio|OR)\b[^0-9;.]{0,25}?(0?\.\d+)",
     re.IGNORECASE,
 )
+# CLAIM_COHORT_MISMATCH reasons where the sentence itself names a population the paper contradicts.
 # evaluate_claim diagnostics that describe the paper (once per result), not one sentence.
 _PER_PAPER_CODES = ("ABSTRACT_UNAVAILABLE", "FULLTEXT_UNAVAILABLE")
 
@@ -148,6 +150,12 @@ def _sentence_diagnostics(
     return diags
 
 
+def _sentence_cohort_severity(d: Diagnostic, unread: int) -> str:
+    """Keep the warning only when the sentence names a population the paper contradicts and every cited paper
+    was read; a merely omitted subgroup qualifier is a note."""
+    return d.severity if d.details.get("reason") in NAMED_POPULATION_REASONS and not unread else "INFO"
+
+
 def _has_cohort_mismatch(check: SentenceCheck) -> bool:
     return any(d.code == "CLAIM_COHORT_MISMATCH" for d in check.diagnostics)
 
@@ -155,8 +163,8 @@ def _has_cohort_mismatch(check: SentenceCheck) -> bool:
 def _cohort_diagnostics(check: SentenceCheck, peers: Sequence[SentenceCheck]) -> list[Diagnostic]:
     """A population mismatch stands only if every read paper the sentence cites disagrees with it.
 
-    Reported as a note: a sentence lifted from running text often leaves its population implicit, and the
-    subgroup heuristics in ``cohort`` are tuned for deliberate ``--claim`` text.
+    A sentence that names a population the paper contradicts stays a warning. One that merely omits a
+    subgroup qualifier becomes a note: running text often leaves the population implicit.
     """
     read = [c for c in peers if c.report.abstract_available]
     if not _has_cohort_mismatch(check) or not all(_has_cohort_mismatch(c) for c in read):
@@ -169,7 +177,7 @@ def _cohort_diagnostics(check: SentenceCheck, peers: Sequence[SentenceCheck]) ->
             out.append(
                 replace(
                     d,
-                    severity="INFO",
+                    severity=_sentence_cohort_severity(d, unread),
                     message=f"{_quote(s)} — {d.message}",
                     details={**d.details, "location": s.location, "unread_refs": unread},
                 )

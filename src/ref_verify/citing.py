@@ -25,7 +25,7 @@ from ref_verify.scan import (
     document_lines,
     superscript_is_citation,
 )
-from ref_verify.text import strip_accents
+from ref_verify.text import ends_with_abbreviation, strip_accents
 
 NUMERIC_MARKER_RE = re.compile(rf"\s*\[({CITATION_NUMBER_LIST})\]")
 # "(3)" only right before punctuation or the end, so enumerations like "(1) screening" are not citations.
@@ -46,7 +46,6 @@ _LOCATOR_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SENTENCE_END_RE = re.compile(r"[.!?](?:\s*\[[^\]]{1,40}\])?(?=\s+[A-Z0-9(\[\"“]|\s*$)")
-_ABBREVIATION_RE = re.compile(r"(?:\bet al|\be\.g|\bi\.e|\bvs|\bFigs?|\bRefs?|\bapprox|\bcf|\bDr|\bNo|\bVol|\bca)\.$")
 _MAX_RANGE = 50
 
 
@@ -55,7 +54,7 @@ def split_citing_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     start = 0
     for m in _SENTENCE_END_RE.finditer(text):
-        if _ABBREVIATION_RE.search(text[: m.start() + 1]):
+        if ends_with_abbreviation(text[: m.start() + 1]):
             continue
         sentence = text[start : m.end()].strip()
         if sentence:

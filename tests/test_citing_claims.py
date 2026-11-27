@@ -13,7 +13,7 @@ from unittest import mock
 
 from test_ref_verify import DAPA_HF_CROSSREF, DAPA_HF_PUBMED_XML, FakeHttpClient
 
-from ref_verify import checklist, citing, grounding, models, scan
+from ref_verify import checklist, citing, grounding, identity, models, scan
 from ref_verify import cli as rv
 
 DAPA_REF = (
@@ -187,6 +187,51 @@ class TestFindingCitingSentences(unittest.TestCase):
         self.assertEqual(_sentences(dapa), ["Mortality fell by 26%."])
 
 
+class TestDuplicateReferences(unittest.TestCase):
+    def test_same_paper_listed_twice_in_references_is_recorded(self) -> None:
+        segments = [
+            ("line 1", "SGLT2 inhibitors help (doi:10.1056/NEJMoa1911303)."),
+            ("line 2", "## References"),
+            ("line 3", DAPA_REF),
+            ("line 4", EMPA_REF),
+            (
+                "line 5",
+                "3. McMurray JJV, et al. Dapagliflozin in HFrEF. N Engl J Med. 2019. PMID: 31535829 doi:10.1056/NEJMoa1911303",
+            ),
+        ]
+        dapa, empa = scan.extract_citations_from_segments(segments)
+        self.assertEqual(dapa.location, "line 3")
+        self.assertEqual(dapa.duplicate_locations, ["line 5"])  # the body mention is not a duplicate entry
+        self.assertEqual(empa.duplicate_locations, [])
+
+    def test_duplicates_count_within_one_list_only(self) -> None:
+        dup = (
+            "References\n" + DAPA_REF + "\n" + DAPA_REF.replace("1.", "2.", 1) + "\n" + DAPA_REF.replace("1.", "3.", 1)
+        )
+        (same_slide,) = scan.extract_citations_from_segments([("Slide 2", dup)])
+        self.assertEqual(same_slide.duplicate_locations, ["Slide 2", "Slide 2"])
+        # Decks repeat a reference on each slide's own list: that is not a duplicate.
+        per_slide = [("Slide 1", "References\n" + DAPA_REF), ("Slide 5", "References\n" + DAPA_REF)]
+        (repeated,) = scan.extract_citations_from_segments(per_slide)
+        self.assertEqual(repeated.duplicate_locations, [])
+
+    def test_duplicate_reference_diagnostic_names_both_entries_and_marks_the_row(self) -> None:
+        cit = models.CitationInput(doi="10.1056/NEJMoa1911303", location="line 3", duplicate_locations=["line 5"])
+        diag = identity.duplicate_reference_diagnostic(cit)
+        self.assertEqual((diag.code, diag.severity), ("DUPLICATE_REFERENCE", "WARNING"))
+        self.assertIn("line 3", diag.actual)
+        self.assertIn("line 5", diag.actual)
+        triple = identity.duplicate_reference_diagnostic(
+            models.CitationInput(doi="10.1/x", location="Slide 2", duplicate_locations=["Slide 2", "Slide 2"])
+        )
+        self.assertIn("3 times", triple.message)
+        self.assertTrue(diag.expected and diag.fix)
+        res = models.VerificationResult(
+            input=cit, status="WARN", resolved=models.PaperRecord(doi=cit.doi), diagnostics=[diag]
+        )
+        self.assertEqual(checklist.build_row(1, res).cells["identifier"].verdict, "warn")
+
+
 class TestSentenceGrounding(unittest.TestCase):
     def test_sentence_numbers_ignore_years_and_stray_digits(self) -> None:
         nums = grounding.sentence_claim_numbers(
@@ -280,6 +325,15 @@ class TestSentenceGrounding(unittest.TestCase):
             [[(d.code, d.severity) for d in r.diagnostics] for r in both_disagree],
             [[("CLAIM_COHORT_MISMATCH", "INFO")]] * 2,
         )
+        # A sentence naming a population the paper contradicts (HFpEF vs HFrEF) stays a warning.
+        conflict = models.Diagnostic(
+            code="CLAIM_COHORT_MISMATCH",
+            severity="WARNING",
+            message="wrong cohort",
+            details={"reason": "cohort_conflict"},
+        )
+        named = grounding.reconcile_sentence_checks([res("10.1/a", [conflict]), res("10.1/b", [conflict])])
+        self.assertEqual([r.diagnostics[0].severity for r in named], ["WARNING", "WARNING"])
 
     def test_uncheckable_co_citation_downgrades_to_a_note(self) -> None:
         s = models.CitingSentence("line 1", "x [1,3].", "40% fewer.", ["10.1/a"], uncheckable_refs=1)

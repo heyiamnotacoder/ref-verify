@@ -16,6 +16,7 @@ from unittest import mock
 from ref_verify import (
     __version__,
     claims,
+    cohort,
     http_client,
     identifiers,
     metadata,
@@ -695,6 +696,81 @@ class TestClaimValidityPack(unittest.TestCase):
             "Serious adverse events occurred in 12.1% of patients.", multi_methods_rec
         )
         self.assertEqual(diags_ae_ok, [])
+
+
+EMPA_REG_RESULTS = (
+    "RESULTS: A total of 7020 patients were treated (median observation time, 3.1 years). The primary outcome "
+    "occurred in 490 of 4687 patients (10.5%) in the pooled empagliflozin group and in 282 of 2333 patients (12.1%) "
+    "in the placebo group (hazard ratio in the empagliflozin group, 0.86; 95.02% confidence interval, 0.74 to 0.99; "
+    "P=0.04 for superiority). There were no significant between-group differences in the rates of myocardial "
+    "infarction or stroke, but in the empagliflozin group there were significantly lower rates of death from "
+    "cardiovascular causes (3.7%, vs. 5.9% in the placebo group; 38% relative risk reduction), hospitalization for "
+    "heart failure (2.7% and 4.1%, respectively; 35% relative risk reduction), and death from any cause (5.7% and "
+    "8.3%, respectively; 32% relative risk reduction). There was a 35% reduction in heart failure hospitalization."
+)
+
+
+class TestCohortClauseAttribution(unittest.TestCase):
+    def test_sentences_do_not_end_at_abbreviations(self) -> None:
+        self.assertEqual(
+            quant.split_sentences("Death fell (3.7%, vs. 5.9% in placebo). McMurray et al. 2019 agreed. Next one."),
+            ["Death fell (3.7%, vs. 5.9% in placebo).", "McMurray et al. 2019 agreed.", "Next one."],
+        )
+
+    def test_sentence_split_edge_cases(self) -> None:
+        # An unclosed "(" must not swallow the rest of a one-line abstract section.
+        self.assertEqual(
+            quant.split_sentences("Mortality fell (HR 0.74 [95% CI 0.65-0.85. The next sentence. Another one."),
+            ["Mortality fell (HR 0.74 [95% CI 0.65-0.85.", "The next sentence.", "Another one."],
+        )
+        # "resp." and lowercase "no." end sentences.
+        self.assertEqual(
+            quant.split_sentences("Rates were 5% and 7% resp. The HR was 0.74. It was trial no. Then it ended."),
+            ["Rates were 5% and 7% resp.", "The HR was 0.74.", "It was trial no.", "Then it ended."],
+        )
+
+    def test_conditions_named_as_populations_are_still_qualifiers(self) -> None:
+        rec = models.PaperRecord(
+            title="Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction",
+            abstract=(
+                "METHODS: We randomly assigned 4744 patients with heart failure and an ejection fraction of 40% or "
+                "less. RESULTS: The primary outcome occurred less often with dapagliflozin (hazard ratio, 0.74)."
+            ),
+        )
+        for claim in (
+            "Dapagliflozin is approved for HFpEF (HR 0.74).",
+            "In patients hospitalized for HFpEF, dapagliflozin lowered events (HR 0.74).",
+        ):
+            self.assertIsNotNone(cohort.check_claim_cohort(claim, rec, ["HR 0.74"]), claim)
+
+    def test_outcome_next_to_a_subgroup_name_is_not_a_subgroup(self) -> None:
+        rec = models.PaperRecord(
+            title="Empagliflozin, Cardiovascular Outcomes, and Mortality in Type 2 Diabetes", abstract=EMPA_REG_RESULTS
+        )
+        for claim, numbers in (
+            ("Empagliflozin also reduced cardiovascular death by 38%.", ["38%"]),
+            ("Empagliflozin cut hospitalization for heart failure by 35%.", ["35%"]),
+        ):
+            self.assertIsNone(cohort.check_claim_cohort(claim, rec, numbers), claim)
+
+    def test_condition_named_outcome_is_not_a_population(self) -> None:
+        outcome = cohort.extract_cohort_qualifiers("There was a 35% reduction in heart failure hospitalization.")
+        self.assertEqual([q.raw for q in outcome], [])
+        population = cohort.extract_cohort_qualifiers("In heart failure patients, events fell by 35%.")
+        self.assertTrue(population)
+
+    def test_wrong_ejection_fraction_population_is_still_flagged(self) -> None:
+        rec = models.PaperRecord(
+            title="Dapagliflozin in Patients with Heart Failure and Reduced Ejection Fraction",
+            abstract=(
+                "METHODS: We randomly assigned 4744 patients with heart failure and an ejection fraction of 40% or "
+                "less. RESULTS: The primary outcome occurred less often with dapagliflozin (hazard ratio, 0.74)."
+            ),
+        )
+        diag = cohort.check_claim_cohort(
+            "In patients with HFpEF, dapagliflozin lowered events (HR 0.74).", rec, ["HR 0.74"]
+        )
+        self.assertIsNotNone(diag)
 
 
 class TestEndToEndMockedVerification(unittest.TestCase):
