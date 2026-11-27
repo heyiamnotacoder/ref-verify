@@ -33,8 +33,11 @@ _PARTICLES = r"(?:(?:van|von|de|der|den|di|da|du|del|della|le|la|dos|das|ten|ter
 # Vancouver/NLM: "Authors. Title. Journal. 2019 Nov 21;381(21):1995-2008."  (Lancet style drops the period
 # after the journal.) Neither the author block nor the title may contain a period, so a split is never guessed.
 _VANCOUVER_RE = re.compile(
-    rf"^(?P<authors>[^.]+?)\.\s+(?P<title>[^.?!]+[.?!])\s+(?P<journal>[A-Z][^.;:()]*?)\.?\s+"
-    rf"(?P<year>{_YEAR})(?:\s+[A-Z][a-z]{{2}}(?:\s+\d{{1,2}})?)?\s*(?:[;:]|$)"
+    rf"^(?P<authors>[^.]+?)\.\s+(?P<title>[^.?!]+[.?!])\s+"
+    # journal may end in a parenthesised place qualifier: "Dermatol Ther (Heidelb)"
+    rf"(?P<journal>[A-Z][^.;:()]*?(?:\s\([A-Z][A-Za-z ]{{1,20}}\))?)\.?\s+"
+    # "2019", "2019 Nov", "2020 June 9", "2017 Jun-Jul"
+    rf"(?P<year>{_YEAR})(?:\s+[A-Z][a-z]{{2,8}}\.?(?:-[A-Z][a-z]{{2,8}})?(?:\s+\d{{1,2}})?)?\s*(?:[;:]|$)"
 )
 # APA: "Surname, A. A., & Surname, B. (2019). Title. Journal, 381(21), 1995-2008."
 _APA_HEAD_RE = re.compile(

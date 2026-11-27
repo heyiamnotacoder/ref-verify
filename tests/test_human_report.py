@@ -77,6 +77,19 @@ class TestReferenceParsing(unittest.TestCase):
             (short.author, short.year, short.title, short.journal), ("McMurray JJV", "2019", None, "N Engl J Med")
         )
 
+    def test_full_month_names_and_journal_qualifiers(self) -> None:
+        ali = refparse.parse_reference(
+            "2. Ali F, Vyas J, Finlay AY. Counting the Burden: atopic dermatitis and Health-related Quality of Life. "
+            "Acta Derm Venereol. 2020 June 9;100(12):adv00161."
+        )
+        self.assertEqual((ali.author, ali.year, ali.journal), ("Ali F", "2020", "Acta Derm Venereol"))
+        samuel = refparse.parse_reference(
+            "12.Samuel C, Cornman H, Kambala A, Kwatra SG. A Review on the Safety of Using JAK Inhibitors in "
+            "Dermatology: Clinical and Laboratory Monitoring. Dermatol Ther (Heidelb). 2023 Mar;13(3):729-49."
+        )
+        self.assertEqual((samuel.author, samuel.journal), ("Samuel C", "Dermatol Ther (Heidelb)"))
+        self.assertTrue(samuel.title and samuel.title.startswith("A Review on the Safety"))
+
     def test_surname_particles_are_names(self) -> None:
         ref = refparse.parse_reference(
             "20.    van Geel MJ, Maatkamp M, Oostveen AM, et al. Comparison of the Dermatology Life Quality Index and "
