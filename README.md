@@ -276,7 +276,7 @@ CLAIM_CHECK:
 `scan` fills these fields only when the reference entry's shape is unambiguous; otherwise the column shows "—" (not checked) instead of guessing.
 
 - **Supported styles**: Vancouver/NLM (including Lancet-style punctuation) and APA. Harvard-style "Smith J (2019) Title…" yields author and year only.
-- **Left unchecked by design**: titles containing a period ("vs.", "E. coli", "St. John's"), dotted journal abbreviations ("N. Engl. J. Med."), surnames starting with a lowercase particle ("van der Meer"), group/committee authors, one- or two-word titles (acronyms like "DAPA-HF"), and bracketed translated titles ("[Effect of …]").
+- **Left unchecked by design**: titles containing a period ("vs.", "E. coli", "St. John's"), dotted journal abbreviations ("N. Engl. J. Med."), group/committee authors and entries with no author list (only journal and year are read; e.g. consensus reports), one- or two-word titles (acronyms like "DAPA-HF"), and bracketed translated titles ("[Effect of …]").
 - **Where parsing applies**: only to lines under a References heading or lines starting with a number ("1.", "[1]"). A DOI in running text is checked by identifier only; if the same paper also appears in References, the row uses that entry.
 - **Residual risk**: An unusual entry that still matches the expected shape can be mis-split and show a false Title/Journal mismatch. The "Cited as" line under each problem shows the exact text that was read, so a mis-read is easy to spot.
 

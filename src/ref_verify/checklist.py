@@ -218,7 +218,8 @@ def build_checklist(
 ) -> list[ChecklistRow]:
     """Verified citations first (document order), then unlinked bibliography entries, numbered continuously."""
     rows = [build_row(i, res) for i, res in enumerate(results, start=1)]
-    rows.extend(build_unlinked_row(len(rows) + i, e) for i, e in enumerate(unlinked, start=1))
+    first_unlinked = len(rows) + 1  # computed once: ``len(rows)`` grows while ``extend`` consumes the generator
+    rows.extend(build_unlinked_row(first_unlinked + i, e) for i, e in enumerate(unlinked))
     return rows
 
 

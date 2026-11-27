@@ -77,6 +77,28 @@ class TestReferenceParsing(unittest.TestCase):
             (short.author, short.year, short.title, short.journal), ("McMurray JJV", "2019", None, "N Engl J Med")
         )
 
+    def test_surname_particles_are_names(self) -> None:
+        ref = refparse.parse_reference(
+            "20.    van Geel MJ, Maatkamp M, Oostveen AM, et al. Comparison of the Dermatology Life Quality Index and "
+            "the Children's Dermatology Life Quality Index. Br J Dermatol. 2016;174(3):578-84. doi:10.1111/bjd.14163"
+        )
+        self.assertEqual(ref.author, "van Geel MJ")
+        self.assertTrue(ref.title and ref.title.startswith("Comparison of the Dermatology"))
+        apa = refparse.parse_reference(
+            "de Bruin, A. B., & Smith, J. (2020). A useful trial of things. Lancet, 1(2), 3-4."
+        )
+        self.assertEqual(apa.author, "de Bruin AB")
+
+    def test_entry_without_author_list_keeps_no_title(self) -> None:
+        # Consensus reports have no authors; "Title part 1. Title part 2. Journal. Year" must not be split
+        # into authors="part 1" and title="part 2".
+        ref = refparse.parse_reference(
+            "17.    Severity scoring of atopic dermatitis: the SCORAD index. Consensus Report of the European Task "
+            "Force on Atopic Dermatitis. Dermatology. 1993;186(1):23-31. doi:10.1159/000247298"
+        )
+        self.assertEqual((ref.author, ref.title), (None, None))
+        self.assertEqual((ref.year, ref.journal), ("1993", "Dermatology"))
+
     def test_unrecognized_text_yields_nothing(self) -> None:
         for text in (
             "As shown in the landmark trial (doi:10.1056/NEJMoa1911303), dapagliflozin reduced events.",
@@ -246,6 +268,12 @@ class TestChecklistRows(unittest.TestCase):
         cells = _cells(row)
         self.assertEqual(cells.pop("identifier"), "warn")
         self.assertEqual(set(cells.values()), {"skip"})
+
+    def test_rows_are_numbered_continuously(self) -> None:
+        res = models.VerificationResult(input=models.CitationInput(doi="10.1/a"), status="PASS")
+        entries = [models.UnlinkedEntry(location=f"line {i}", text=f"{i}. Ref {i}. J. 2020.") for i in range(3)]
+        rows = checklist.build_checklist([res, res], entries)
+        self.assertEqual([r.index for r in rows], [1, 2, 3, 4, 5])
 
     def test_every_emitted_diagnostic_code_maps_to_a_column(self) -> None:
         pkg_dir = Path(models.__file__).parent
