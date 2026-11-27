@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +20,68 @@ SCAN_PMID_RE = re.compile(
     r"(?:\bPMID\s*[:#]?\s*(\d{5,9})\b|pubmed\.ncbi\.nlm\.nih\.gov/(\d{5,9})(?:/|\b))",
     flags=re.IGNORECASE,
 )
+
+
+# "3", "1,2", "4-6", "1, 3\u20135": the number lists used by Vancouver citation markers.
+CITATION_NUMBER_LIST = r"\d{1,3}(?:\s*[,\u2013\-]\s*\d{1,3})*"
+# A superscript run is a citation marker ("26%.¹,²") only if it is a short number list and does not
+# follow a unit, a number, or a one/two-letter symbol ("kg/m²", "10³", "I²", "R²", "χ²").
+SUPERSCRIPT_CITATION_RE = re.compile(rf"\s*{CITATION_NUMBER_LIST}\s*")
+_SUPERSCRIPT_UNIT_RE = re.compile(
+    r"(?:\b(?:[kcmµμ]?m|[mkµμ]?g|d?[lL]|mol|s)|/[A-Za-z]+|(?<![\d.])10|\^|(?<![^\W\d_])[^\W\d_]{1,2})$"
+)
+
+
+def superscript_is_citation(sup: str, before: str) -> bool:
+    """Whether superscript ``sup`` written right after ``before`` is a citation marker, not an exponent."""
+    return bool(SUPERSCRIPT_CITATION_RE.fullmatch(sup)) and not _SUPERSCRIPT_UNIT_RE.search(before.rstrip())
+
+
+def _paragraph_text(p_elem: ET.Element, is_superscript_run: Callable[[ET.Element], bool]) -> str:
+    """Join a paragraph's text runs, rendering superscript citation numbers as "[n]" markers."""
+    superscript_texts: set[int] = set()
+    for run in p_elem.iter():
+        if run.tag.endswith("}r") and is_superscript_run(run):
+            superscript_texts.update(id(t) for t in run if t.tag.endswith("}t"))
+
+    pieces: list[str] = []
+    pending_sup: list[str] = []
+
+    def flush_sup() -> None:
+        if not pending_sup:
+            return
+        sup = "".join(pending_sup)
+        pending_sup.clear()
+        before = "".join(pieces).rstrip()
+        if superscript_is_citation(sup, before):
+            pieces.append(f"[{sup.strip()}]")
+        else:
+            pieces.append(sup)
+
+    for t in p_elem.iter():
+        if not ((t.tag.endswith("}t") or t.tag == "t") and t.text):
+            continue
+        if id(t) in superscript_texts:
+            pending_sup.append(t.text)
+        else:
+            flush_sup()
+            pieces.append(t.text)
+    flush_sup()
+    return "".join(pieces).strip()
+
+
+def _docx_superscript(run: ET.Element) -> bool:
+    return any(el.tag.endswith("}vertAlign") and "superscript" in el.attrib.values() for rpr in run for el in rpr)
+
+
+def _pptx_superscript(run: ET.Element) -> bool:
+    for rpr in run:
+        if rpr.tag.endswith("}rPr"):
+            try:
+                return int(rpr.attrib.get("baseline", "0")) > 0
+            except ValueError:
+                return False
+    return False
 
 
 def _extract_segments_from_docx(path: Path) -> list[tuple[str, str]]:
@@ -45,8 +107,7 @@ def _extract_segments_from_docx(path: Path) -> list[tuple[str, str]]:
             p_idx = 0
             for elem in root.iter():
                 if elem.tag.endswith("}p") or elem.tag == "p":
-                    texts = [t.text for t in elem.iter() if (t.tag.endswith("}t") or t.tag == "t") and t.text]
-                    joined = "".join(texts).strip()
+                    joined = _paragraph_text(elem, _docx_superscript)
                     if joined:
                         p_idx += 1
                         segments.append((f"{part_label}:p{p_idx}", joined))
@@ -78,8 +139,7 @@ def _extract_segments_from_pptx(path: Path) -> list[tuple[str, str]]:
             paras: list[str] = []
             for elem in root.iter():
                 if elem.tag.endswith("}p") or elem.tag == "p":
-                    texts = [t.text for t in elem.iter() if (t.tag.endswith("}t") or t.tag == "t") and t.text]
-                    joined = "".join(texts).strip()
+                    joined = _paragraph_text(elem, _pptx_superscript)
                     if joined:
                         paras.append(joined)
             if paras:
@@ -160,6 +220,7 @@ class DocLine:
     end: int
     text: str  # stripped
     is_bibliography_entry: bool  # under a References/Bibliography heading (the heading itself excluded)
+    reference_list: int = -1  # which References section (0, 1, ... in document order); -1 outside one
 
 
 @dataclass(frozen=True)
@@ -175,6 +236,7 @@ def document_lines(segments: Sequence[tuple[str, str]]) -> list[DocLine]:
     """Every non-blank line in document order, tracking whether it sits under a References/Bibliography heading."""
     lines: list[DocLine] = []
     in_bib = False
+    list_index = -1  # each References heading starts a new list (e.g. one per slide)
     prev_part: str | None = None
     for seg_idx, (loc, text) in enumerate(segments):
         part = _segment_part_key(loc)
@@ -188,11 +250,12 @@ def document_lines(segments: Sequence[tuple[str, str]]) -> list[DocLine]:
             entry = False
             if BIBLIOGRAPHY_HEADING_RE.match(stripped):
                 in_bib = True
+                list_index += 1
             elif in_bib and _is_bibliography_section_end(stripped):
                 in_bib = False
             else:
                 entry = in_bib
-            lines.append(DocLine(seg_idx, loc, m.start(), m.end(), stripped, entry))
+            lines.append(DocLine(seg_idx, loc, m.start(), m.end(), stripped, entry, list_index if entry else -1))
     return lines
 
 
@@ -326,15 +389,31 @@ def _attach_reference(cit: CitationInput, entry: BibliographyEntry | None) -> No
     cit.location = entry.location
 
 
+def _record_reference_entry(
+    cit: CitationInput, entry: BibliographyEntry | None, first_entry: dict[int, BibliographyEntry]
+) -> None:
+    """Remember a citation's first References entry; another entry for it *in the same list* is a duplicate.
+
+    Repeating a reference in a different list (each slide's own References) is not a duplicate.
+    """
+    if entry is None or not entry.lines[0].is_bibliography_entry:  # body text / numbered lists don't count
+        return
+    seen = first_entry.setdefault(id(cit), entry)
+    if seen is not entry and seen.lines[0].reference_list == entry.lines[0].reference_list:
+        cit.duplicate_locations.append(entry.location)
+
+
 def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list[CitationInput]:
     """One citation per cited paper: DOIs/PMIDs merged across mentions, cited fields from its reference entry.
 
     A later mention merges into an earlier citation of the same DOI or PMID unless it pairs that identifier
-    with a *different* partner ID (kept separate so PMID_DOI_CONFLICT stays visible).
+    with a *different* partner ID (kept separate so PMID_DOI_CONFLICT stays visible). A second References
+    entry for the same paper is recorded in ``duplicate_locations``.
     """
     extracted: list[CitationInput] = []
     by_doi: dict[str, CitationInput] = {}
     by_pmid: dict[str, CitationInput] = {}
+    first_entry: dict[int, BibliographyEntry] = {}  # id(citation) -> its first References entry
 
     for unit in _citation_units(segments):
         doi_key = unit.doi.lower() if unit.doi else None
@@ -352,6 +431,7 @@ def extract_citations_from_segments(segments: Sequence[tuple[str, str]]) -> list
             by_doi.setdefault(doi_key, cit)
         if unit.pmid:
             by_pmid.setdefault(unit.pmid, cit)
+        _record_reference_entry(cit, unit.reference, first_entry)
         _attach_reference(cit, unit.reference)
         cit.label = _citation_label(cit.location or unit.location, cit.doi, cit.pmid)
 

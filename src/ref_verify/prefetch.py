@@ -17,7 +17,7 @@ from ref_verify.sources.pubmed import fetch_pubmed_pmids_batch, pubmed_esearch_b
 
 
 def needs_epmc_for_doi(
-    claim: str | None,
+    needs_abstract: bool,
     cr_rec: PaperRecord | None,
     pm_rec: PaperRecord | None,
     *,
@@ -28,13 +28,13 @@ def needs_epmc_for_doi(
     return (
         cr_rec is None
         or (not has_pmid and pm_rec is None)
-        or (bool(claim) and not (pm_rec and pm_rec.abstract) and not (cr_rec and cr_rec.abstract))
+        or (needs_abstract and not (pm_rec and pm_rec.abstract) and not (cr_rec and cr_rec.abstract))
         or (want_fulltext and not (pm_rec and pm_rec.pmcid))
     )
 
 
 def needs_epmc_for_pmid(
-    claim: str | None,
+    needs_abstract: bool,
     pm_rec: PaperRecord | None,
     cr_rec: PaperRecord | None,
     *,
@@ -43,7 +43,7 @@ def needs_epmc_for_pmid(
     """Whether Europe PMC must be asked about a PMID given what PubMed and Crossref returned."""
     return (
         pm_rec is None
-        or (bool(claim) and not pm_rec.abstract and not (cr_rec and cr_rec.abstract))
+        or (needs_abstract and not pm_rec.abstract and not (cr_rec and cr_rec.abstract))
         or (want_fulltext and not pm_rec.pmcid)
     )
 
@@ -276,13 +276,13 @@ def prefetch_batch(
         if (
             c_doi
             and c_doi.lower() not in epmc_tried_dois
-            and needs_epmc_for_doi(cit.claim, cr_r, pm_r, has_pmid=bool(c_pmid), want_fulltext=want_ft)
+            and needs_epmc_for_doi(cit.has_claims, cr_r, pm_r, has_pmid=bool(c_pmid), want_fulltext=want_ft)
         ):
             epmc_fallback_dois.append(c_doi)
         if (
             c_pmid
             and c_pmid not in cache.epmc_by_pmid
-            and needs_epmc_for_pmid(cit.claim, pm_r, cr_r, want_fulltext=want_ft)
+            and needs_epmc_for_pmid(cit.has_claims, pm_r, cr_r, want_fulltext=want_ft)
         ):
             epmc_fallback_pmids.append(c_pmid)
         if want_ft and pm_r and pm_r.pmcid:

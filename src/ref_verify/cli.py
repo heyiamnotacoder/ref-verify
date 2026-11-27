@@ -15,6 +15,7 @@ from typing import Any
 
 from ref_verify import __version__
 from ref_verify.checklist import build_checklist
+from ref_verify.citing import attach_citing_sentences
 from ref_verify.html_report import render_html_report
 from ref_verify.http_client import DEFAULT_TIMEOUT, HttpClient
 from ref_verify.models import CitationInput, Diagnostic, UnlinkedEntry, VerificationResult
@@ -173,6 +174,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 2
 
     citations = extract_citations_from_segments(segments)
+    attach_citing_sentences(segments, citations)
     unlinked_entries = extract_unlinked_bibliography_entries(segments)
     scan_diag = build_unlinked_bibliography_diagnostic(unlinked_entries)
     scan_diagnostics: list[Diagnostic] = [scan_diag] if scan_diag else []

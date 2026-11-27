@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 from ref_verify.lexicons import PHARMA_STEMS, STOPWORDS
-from ref_verify.text import normalize_text
+from ref_verify.text import ends_with_abbreviation, normalize_text
 
 # Patterns for quantitative expressions in scientific/biomedical claims
 QUANT_PATTERNS = [
@@ -196,6 +196,10 @@ def extract_claim_keywords(claim: str) -> list[str]:
     return keywords[:15]
 
 
+_PAREN_LOOKAHEAD = 200
+_SENTENCE_GAP_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(])")
+
+
 def split_sentences(text: str) -> list[str]:
     # Split on newlines or sentence-ending punctuation followed by whitespace and uppercase/digit
     parts: list[str] = []
@@ -203,10 +207,20 @@ def split_sentences(text: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", line):
-            s = sent.strip()
-            if s:
-                parts.append(s)
+        start = 0
+        for m in _SENTENCE_GAP_RE.finditer(line):
+            head = line[start : m.start()]
+            # Never end a sentence at "vs." / "et al." or inside a parenthesis that closes soon after
+            # ("(3.7%, vs. 5.9%; ...)"); an unclosed "(" must not swallow the rest of the line.
+            if ends_with_abbreviation(head) or (
+                head.count("(") > head.count(")") and ")" in line[m.end() : m.end() + _PAREN_LOOKAHEAD]
+            ):
+                continue
+            if head.strip():
+                parts.append(head.strip())
+            start = m.end()
+        if line[start:].strip():
+            parts.append(line[start:].strip())
     return parts
 
 

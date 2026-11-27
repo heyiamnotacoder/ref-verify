@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from ref_verify.models import Diagnostic, HttpResponse, PaperRecord
+from ref_verify.models import CitationInput, Diagnostic, HttpResponse, PaperRecord
 from ref_verify.text import title_similarity
 
 Candidates = Sequence[dict[str, Any]]
@@ -130,6 +130,25 @@ def enrich_doi_syntax_fix(diagnostics: list[Diagnostic], cited_doi: str, clean_d
         if d.code == "DOI_SYNTAX_INVALID":
             d.details["cleaned_candidate_resolved"] = {"doi": rec.doi, "title": rec.title, "year": rec.best_year()}
             d.fix = f"Replace '{cited_doi}' with '{clean_doi}' (verified live: \"{rec.title}\", {rec.best_year()})."
+
+
+def duplicate_reference_diagnostic(cit: CitationInput) -> Diagnostic:
+    """The same paper (DOI/PMID) appears as more than one entry in the reference list."""
+    locations = [cit.location or "?", *cit.duplicate_locations]
+    ident = cit.doi or f"PMID:{cit.pmid}"
+    return Diagnostic(
+        code="DUPLICATE_REFERENCE",
+        severity="WARNING",
+        message=f"{ident} is listed {len(locations)} times in the reference list ({', '.join(locations)}).",
+        expected="Each cited paper appears once in the reference list",
+        actual=f"same paper at {', '.join(locations)}",
+        details={"locations": locations},
+        hint="Duplicated references usually come from merging drafts or re-inserting a citation by hand.",
+        fix=(
+            f"Keep one entry ({locations[0]}), delete the other {len(locations) - 1}, and renumber the in-text "
+            "citations that pointed to them."
+        ),
+    )
 
 
 def id_conflict_diagnostic(doi: str, pmid: str, doi_rec: PaperRecord, pmid_rec: PaperRecord) -> Diagnostic | None:

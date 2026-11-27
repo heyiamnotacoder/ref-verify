@@ -91,6 +91,24 @@ class PaperRecord:
 
 
 @dataclass
+class CitingSentence:
+    """A sentence in the scanned document that cites one or more references."""
+
+    location: str
+    text: str  # as written, citation markers included
+    claim: str  # the same sentence with citation markers, DOIs, and PMIDs removed
+    cited_keys: list[str]  # citation_key() of every checkable paper this sentence cites
+    uncheckable_refs: int = 0  # cited references with no DOI/PMID (their numbers cannot be looked up)
+
+
+def citation_key(doi: str | None, pmid: str | None) -> str:
+    """Stable identity for one cited paper within a document: its DOI, else its PMID."""
+    if doi:
+        return doi.strip().lower()
+    return f"pmid:{(pmid or '').strip()}"
+
+
+@dataclass
 class CitationInput:
     doi: str | None = None
     pmid: str | None = None
@@ -103,6 +121,17 @@ class CitationInput:
     location: str | None = None
     fulltext: bool = False
     reference_text: str | None = None  # bibliography line `scan` parsed the cited fields from
+    citing_sentences: list[CitingSentence] = field(default_factory=list)
+    duplicate_locations: list[str] = field(default_factory=list)  # further References entries for this paper
+
+    @property
+    def key(self) -> str:
+        return citation_key(self.doi, self.pmid)
+
+    @property
+    def has_claims(self) -> bool:
+        """Whether verification must fetch abstract text to ground a claim or citing sentence."""
+        return bool(self.claim or self.citing_sentences)
 
 
 @dataclass
@@ -121,6 +150,17 @@ class ClaimReport:
 
 
 @dataclass
+class SentenceCheck:
+    """One citing sentence grounded against one cited paper (before co-citation reconciliation)."""
+
+    sentence: CitingSentence
+    report: ClaimReport
+    diagnostics: list[Diagnostic] = field(default_factory=list)
+    # Set by reconciliation: numbers that no co-cited paper reports either (what the sentence is flagged for).
+    missing_after_cocitation: list[str] = field(default_factory=list)
+
+
+@dataclass
 class VerificationResult:
     input: CitationInput
     status: str  # PASS | WARN | FAIL
@@ -128,6 +168,16 @@ class VerificationResult:
     diagnostics: list[Diagnostic] = field(default_factory=list)
     claim_report: ClaimReport | None = None
     did_you_mean: list[dict[str, Any]] = field(default_factory=list)
+    sentence_checks: list[SentenceCheck] = field(default_factory=list)
+
+
+def status_for(diagnostics: list[Diagnostic]) -> str:
+    """PASS | WARN | FAIL from the worst diagnostic severity."""
+    if any(d.severity in ("CRITICAL", "ERROR") for d in diagnostics):
+        return "FAIL"
+    if any(d.severity == "WARNING" for d in diagnostics):
+        return "WARN"
+    return "PASS"
 
 
 @dataclass

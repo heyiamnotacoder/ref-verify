@@ -7,11 +7,13 @@ from collections.abc import Sequence
 from typing import Any
 
 from ref_verify.claims import evaluate_claim
+from ref_verify.grounding import ground_sentence, reconcile_sentence_checks
 from ref_verify.http_client import HttpClient, is_transient_http
 from ref_verify.identifiers import clean_identifiers
 from ref_verify.identity import (
     doi_lookup_down,
     doi_not_found_diagnostic,
+    duplicate_reference_diagnostic,
     enrich_doi_syntax_fix,
     id_conflict_diagnostic,
     no_identifier_diagnostic,
@@ -27,7 +29,9 @@ from ref_verify.models import (
     FulltextResult,
     HttpResponse,
     PaperRecord,
+    SentenceCheck,
     VerificationResult,
+    status_for,
 )
 from ref_verify.prefetch import PrefetchCache, needs_epmc_for_doi, needs_epmc_for_pmid, prefetch_batch
 from ref_verify.sources.crossref import fetch_crossref_doi, search_crossref_by_title
@@ -86,6 +90,8 @@ def verify_citation(
     prefetched: PrefetchCache | None = None,
 ) -> VerificationResult:
     clean_doi, clean_pmid, diagnostics = clean_identifiers(cit)
+    if cit.duplicate_locations:
+        diagnostics.append(duplicate_reference_diagnostic(cit))
     did_you_mean: list[dict[str, Any]] = []
 
     if not clean_doi and not clean_pmid:
@@ -104,7 +110,7 @@ def verify_citation(
     epmc_pmid_rec: PaperRecord | None = None
     pm_resp: HttpResponse | None = None
     prefetched_ft: FulltextResult | None = None
-    want_fulltext = bool(cit.claim and cit.fulltext)
+    want_fulltext = bool(cit.has_claims and cit.fulltext)
 
     # Seed from batch PrefetchCache if available
     if prefetched is not None:
@@ -237,7 +243,7 @@ def verify_citation(
     # Targeted Europe PMC fallback (avoids Europe PMC stalls when Crossref + PubMed already resolved!)
     if clean_doi and epmc_doi_resp is None:
         need_epmc_for_doi = needs_epmc_for_doi(
-            cit.claim, cr_rec, pm_rec, has_pmid=bool(clean_pmid), want_fulltext=want_fulltext
+            cit.has_claims, cr_rec, pm_rec, has_pmid=bool(clean_pmid), want_fulltext=want_fulltext
         )
         if need_epmc_for_doi:
             cr_transient = is_transient_http(cr_resp)
@@ -258,7 +264,7 @@ def verify_citation(
 
     if clean_pmid and not epmc_pmid_checked:
         already_covered = epmc_doi_rec is not None and epmc_doi_rec.pmid == clean_pmid
-        need_epmc_for_pmid = needs_epmc_for_pmid(cit.claim, pm_rec, cr_rec, want_fulltext=want_fulltext)
+        need_epmc_for_pmid = needs_epmc_for_pmid(cit.has_claims, pm_rec, cr_rec, want_fulltext=want_fulltext)
         if not already_covered and need_epmc_for_pmid:
             epmc_pmid_rec, _ = fetch_epmc(
                 http,
@@ -335,9 +341,10 @@ def verify_citation(
 
     diagnostics.extend(check_metadata(cit, resolved))
 
-    # Claim Validity Pack
+    # Claim Validity Pack: an explicit --claim and/or the document's own citing sentences
     claim_report: ClaimReport | None = None
-    if cit.claim:
+    sentence_checks: list[SentenceCheck] = []
+    if cit.has_claims:
         if prefetched_ft is None and want_fulltext and resolved.pmcid and prefetched is not None:
             prefetched_ft = prefetched.fulltext_by_pmcid.get(resolved.pmcid.strip().upper())
         # Guard against using an eagerly prefetched fulltext if resolved PMCID somehow differed
@@ -350,13 +357,19 @@ def verify_citation(
             prefetched_ft = None
         if prefetched_ft is None and cit.fulltext and resolved.pmcid:
             prefetched_ft = fetch_oa_fulltext_paragraphs(http, resolved.pmcid, is_open_access=resolved.is_open_access)
-        claim_report, c_diags = evaluate_claim(
-            cit.claim, resolved, fulltext_requested=cit.fulltext, fulltext=prefetched_ft
-        )
-        diagnostics.extend(c_diags)
+        if cit.claim:
+            claim_report, c_diags = evaluate_claim(
+                cit.claim, resolved, fulltext_requested=cit.fulltext, fulltext=prefetched_ft
+            )
+            diagnostics.extend(c_diags)
+        # Sentence diagnostics are added by reconcile_sentence_checks once every co-cited paper is known.
+        sentence_checks = [
+            ground_sentence(s, resolved, fulltext_requested=cit.fulltext, fulltext=prefetched_ft)
+            for s in cit.citing_sentences
+        ]
 
     diagnostics.sort(key=lambda d: SEVERITY_ORDER.get(d.severity, 99))
-    return _result(cit, diagnostics, resolved, claim_report, did_you_mean)
+    return _result(cit, diagnostics, resolved, claim_report, did_you_mean, sentence_checks)
 
 
 def _result(
@@ -365,14 +378,16 @@ def _result(
     resolved: PaperRecord | None = None,
     claim_report: ClaimReport | None = None,
     did_you_mean: list[dict[str, Any]] | None = None,
+    sentence_checks: list[SentenceCheck] | None = None,
 ) -> VerificationResult:
     return VerificationResult(
         input=cit,
-        status=_compute_status(diagnostics),
+        status=status_for(diagnostics),
         resolved=resolved,
         diagnostics=diagnostics,
         claim_report=claim_report,
         did_you_mean=did_you_mean or [],
+        sentence_checks=sentence_checks or [],
     )
 
 
@@ -386,7 +401,7 @@ def verify_citations_batch(
         return []
     workers = max(1, int(max_workers))
     if len(citations) == 1:
-        return [verify_citation(citations[0], http)]
+        return reconcile_sentence_checks([verify_citation(citations[0], http)])
 
     # Phase 0: Local syntax pre-validation to collect unique DOIs and PMIDs
     parsed_ids: list[tuple[str | None, str | None, bool]] = []
@@ -397,7 +412,7 @@ def verify_citations_batch(
 
     for cit in citations:
         c_doi, c_pmid, _ = clean_identifiers(cit)
-        parsed_ids.append((c_doi, c_pmid, bool(cit.claim and cit.fulltext)))
+        parsed_ids.append((c_doi, c_pmid, bool(cit.has_claims and cit.fulltext)))
         if c_doi and c_doi.lower() not in seen_dois:
             seen_dois.add(c_doi.lower())
             unique_dois.append(c_doi)
@@ -407,7 +422,7 @@ def verify_citations_batch(
 
     if workers == 1:
         cache = prefetch_batch(citations, parsed_ids, unique_dois, unique_pmids, http, workers)
-        return [verify_citation(cit, http, prefetched=cache) for cit in citations]
+        return reconcile_sentence_checks([verify_citation(cit, http, prefetched=cache) for cit in citations])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(citations))) as pool:
         # Citations with no usable identifier never read the prefetch cache, so their title
@@ -419,12 +434,4 @@ def verify_citations_batch(
         }
         cache = prefetch_batch(citations, parsed_ids, unique_dois, unique_pmids, http, workers)
         futures = [early.get(i) or pool.submit(verify_citation, cit, http, cache) for i, cit in enumerate(citations)]
-        return [f.result() for f in futures]
-
-
-def _compute_status(diagnostics: Sequence[Diagnostic]) -> str:
-    if any(d.severity in ("CRITICAL", "ERROR") for d in diagnostics):
-        return "FAIL"
-    if any(d.severity == "WARNING" for d in diagnostics):
-        return "WARN"
-    return "PASS"
+        return reconcile_sentence_checks([f.result() for f in futures])
