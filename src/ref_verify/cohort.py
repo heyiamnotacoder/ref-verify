@@ -235,6 +235,14 @@ _COHORT_KNOWN_COND_RE = re.compile(
 )
 
 
+# "hospitalization for heart failure", "admission for COPD": an outcome named after a condition, not a population.
+_OUTCOME_BEFORE_FOR_RE = re.compile(
+    r"\b(?:hospitali[sz]ations?|(?:re)?admissions?|(?:ed\s+)?visits?|deaths?|mortality|events?|risk|"
+    r"treatment|therapy|indicated|approved|admitted|hospitali[sz]ed)\s*$",
+    re.IGNORECASE,
+)
+
+
 _AGE_LEFT_BOUND = r"(?<![A-Za-z0-9.])"
 
 
@@ -648,6 +656,8 @@ def _extract_cohort_qualifiers_uncached(text: str) -> list[CohortQualifier]:
 
     # 7. Shorthand "in <known condition>" (e.g. "in HFpEF", "in CKD", "in type 2 diabetes")
     for m in _COHORT_KNOWN_COND_RE.finditer(norm):
+        if m.group(0).lower().startswith("for") and _OUTCOME_BEFORE_FOR_RE.search(norm[: m.start()]):
+            continue
         cond = m.group(1).strip()
         q = _make_cohort_qualifier(cond, "with", cond)
         if q is not None and not any(existing.terms == q.terms for existing in qualifiers):

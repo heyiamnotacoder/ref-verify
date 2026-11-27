@@ -280,6 +280,15 @@ class TestSentenceGrounding(unittest.TestCase):
             [[(d.code, d.severity) for d in r.diagnostics] for r in both_disagree],
             [[("CLAIM_COHORT_MISMATCH", "INFO")]] * 2,
         )
+        # A sentence naming a population the paper contradicts (HFpEF vs HFrEF) stays a warning.
+        conflict = models.Diagnostic(
+            code="CLAIM_COHORT_MISMATCH",
+            severity="WARNING",
+            message="wrong cohort",
+            details={"reason": "cohort_conflict"},
+        )
+        named = grounding.reconcile_sentence_checks([res("10.1/a", [conflict]), res("10.1/b", [conflict])])
+        self.assertEqual([r.diagnostics[0].severity for r in named], ["WARNING", "WARNING"])
 
     def test_uncheckable_co_citation_downgrades_to_a_note(self) -> None:
         s = models.CitingSentence("line 1", "x [1,3].", "40% fewer.", ["10.1/a"], uncheckable_refs=1)

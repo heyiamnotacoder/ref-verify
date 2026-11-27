@@ -81,3 +81,14 @@ def truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3].rstrip() + "..."
+
+
+# Abbreviations whose period never ends a sentence ("et al.", "vs.", "Fig.", "e.g.").
+_ABBREVIATION_END_RE = re.compile(
+    r"(?:\bet al|\be\.g|\bi\.e|\bvs|\bFigs?|\bRefs?|\bapprox|\bcf|\bDr|\bNo|\bVol|\bca|\bresp)\.$", re.IGNORECASE
+)
+
+
+def ends_with_abbreviation(text: str) -> bool:
+    """Whether ``text`` ends in an abbreviation period rather than a sentence-ending one."""
+    return bool(_ABBREVIATION_END_RE.search(text))
