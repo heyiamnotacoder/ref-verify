@@ -252,6 +252,33 @@ CLAIM_CHECK:
 
 - **Deterministic metadata + grounded evidence**: Identifier resolution, retraction flags, metadata diffs, and numeric extraction are 100% deterministic. Semantic claim verification (direction of effect, subgroup caveats, exact population) is performed by comparing the claim against the printed official abstract or Open Access full text (NCBI PMC / Europe PMC)—never from model memory.
 - **Paywalled full text**: When a secondary endpoint or table figure lives only in a paywalled PDF without an Open Access XML copy in NCBI PMC or Europe PMC, `ref-verify` flags the missing numbers so you know to inspect the PDF directly.
+- **Live APIs required**: Every check needs Crossref, PubMed, or Europe PMC to answer. During an outage a citation shows `LOOKUP_ERROR` (✗ in DOI/PMID) rather than a false pass.
+
+### Document scanning (`scan`)
+
+- **File types**: `.md`, `.txt`, `.docx`, and `.pptx` only. PDFs, `.doc`, `.odt`, Keynote, and Google Docs/Slides must be exported first.
+- **What counts as a reference list**: Plain-text references (no DOI/PMID) are found only under a heading named References, Bibliography, Works Cited, or Literature Cited. Lists under other headings ("Sources", "Literature", "Further reading") and slide footnotes without such a heading produce no row.
+- **Identifiers on one line**: A DOI broken across two lines (or split by a hyphen at a line end) is not detected.
+- **Duplicate references are merged**: The same DOI/PMID cited twice in the References list becomes one row; the duplication itself is not reported.
+- **Unlinked entries are not verified**: An `UNVERIFIED` row is listed but never looked up (no title search). Add the DOI/PMID, or check it with `batch` using `title`/`author`/`year`.
+- **Wrapped references**: A numbered reference wrapped over several lines is read as one entry. An *unnumbered* reference wrapped over several lines (e.g. an APA list in a `.txt` file) is read line by line and can produce extra `UNVERIFIED` rows.
+- **No claim checking in `scan`**: The Claim column is always "—" for scanned files. Claims are checked only when given explicitly (`check --claim`, or `claim` in `batch` JSON).
+
+### Reading cited title, author, year, and journal
+
+`scan` fills these fields only when the reference entry's shape is unambiguous; otherwise the column shows "—" (not checked) instead of guessing.
+
+- **Supported styles**: Vancouver/NLM (including Lancet-style punctuation) and APA. Harvard-style "Smith J (2019) Title…" yields author and year only.
+- **Left unchecked by design**: titles containing a period ("vs.", "E. coli", "St. John's"), dotted journal abbreviations ("N. Engl. J. Med."), surnames starting with a lowercase particle ("van der Meer"), group/committee authors, one- or two-word titles (acronyms like "DAPA-HF"), and bracketed translated titles ("[Effect of …]").
+- **Where parsing applies**: only to lines under a References heading or lines starting with a number ("1.", "[1]"). A DOI in running text is checked by identifier only; if the same paper also appears in References, the row uses that entry.
+- **Residual risk**: An unusual entry that still matches the expected shape can be mis-split and show a false Title/Journal mismatch. The "Cited as" line under each problem shows the exact text that was read, so a mis-read is easy to spot.
+
+### Checklist table and HTML report
+
+- **Terminal width**: On narrow terminals the Where and Reference columns are truncated; the HTML report and the "What to fix" list show them in full.
+- **Symbols**: Terminals that cannot print ✓ ⚠ ✗ — fall back to `ok ! X -`. A few terminals render ⚠ as a wide emoji, which shifts that row's alignment by one column.
+- **Exit codes**: `UNVERIFIED` rows (no DOI/PMID) are warnings: they make `scan` exit `1` only with `--strict`.
+- **HTML report**: A static snapshot; re-run `ref-verify` to refresh it. Expanding rows needs JavaScript (printing shows every row's details). It contains your reference text, so share it as you would the manuscript.
 
 ---
 
