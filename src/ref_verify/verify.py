@@ -366,9 +366,7 @@ def verify_citation(
         ]
 
     diagnostics.sort(key=lambda d: SEVERITY_ORDER.get(d.severity, 99))
-    result = _result(cit, diagnostics, resolved, claim_report, did_you_mean)
-    result.sentence_checks = sentence_checks
-    return result
+    return _result(cit, diagnostics, resolved, claim_report, did_you_mean, sentence_checks)
 
 
 def _result(
@@ -377,6 +375,7 @@ def _result(
     resolved: PaperRecord | None = None,
     claim_report: ClaimReport | None = None,
     did_you_mean: list[dict[str, Any]] | None = None,
+    sentence_checks: list[SentenceCheck] | None = None,
 ) -> VerificationResult:
     return VerificationResult(
         input=cit,
@@ -385,6 +384,7 @@ def _result(
         diagnostics=diagnostics,
         claim_report=claim_report,
         did_you_mean=did_you_mean or [],
+        sentence_checks=sentence_checks or [],
     )
 
 

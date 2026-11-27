@@ -119,6 +119,73 @@ class TestFindingCitingSentences(unittest.TestCase):
             ((_, text),) = scan.extract_text_segments(p)
         self.assertEqual(text, "Risk fell by 26%.[1,2] Patients over 30 kg/m2 were excluded.")
 
+    def test_statistics_superscripts_are_not_citations(self) -> None:
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        sup = '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+        runs = "".join(
+            f"<w:r><w:t>{before}</w:t></w:r><w:r>{sup}<w:t>2</w:t></w:r>"
+            for before in ("Heterogeneity was high (I", " = 45%), R", " = 0.8, \u03c7")
+        )
+        doc_xml = (
+            f'<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="{w}"><w:body>'
+            f"<w:p>{runs}<w:r><w:t> = 12.1.</w:t></w:r></w:p></w:body></w:document>"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "m.docx"
+            with zipfile.ZipFile(p, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+            ((_, text),) = scan.extract_text_segments(p)
+        self.assertNotIn("[2]", text)
+
+    def test_parenthesised_and_typed_superscript_markers(self) -> None:
+        segments = [
+            ("line 1", "Empagliflozin lowered CV death by 38% (2). Steps were (1) screening and (2) dosing."),
+            ("line 2", "Dapagliflozin cut events (HR 0.74)¹, and χ² was 4.1 at 30 kg/m²."),
+            ("line 3", "## References"),
+            ("line 4", DAPA_REF),
+            ("line 5", EMPA_REF),
+        ]
+        dapa, empa = _scan(segments)
+        self.assertEqual(_sentences(empa), ["Empagliflozin lowered CV death by 38%."])
+        self.assertEqual(len(dapa.citing_sentences), 1)
+        self.assertNotIn("¹", dapa.citing_sentences[0].claim)
+
+    def test_superscript_after_a_number_is_a_citation_but_ten_cubed_is_not(self) -> None:
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        sup = '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+        doc_xml = (
+            f'<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="{w}"><w:body><w:p>'
+            f"<w:r><w:t>HR 0.74</w:t></w:r><w:r>{sup}<w:t>1</w:t></w:r>"
+            f"<w:r><w:t> with 10</w:t></w:r><w:r>{sup}<w:t>3</w:t></w:r><w:r><w:t> cells.</w:t></w:r>"
+            "</w:p></w:body></w:document>"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "m.docx"
+            with zipfile.ZipFile(p, "w") as zf:
+                zf.writestr("word/document.xml", doc_xml)
+            ((_, text),) = scan.extract_text_segments(p)
+        self.assertEqual(text, "HR 0.74[1] with 103 cells.")
+
+    def test_same_number_listed_twice_for_the_same_paper_still_maps(self) -> None:
+        segments = [
+            ("line 1", "Mortality fell by 26% [1]."),
+            ("line 2", "## References"),
+            ("line 3", DAPA_REF),
+            ("line 4", DAPA_REF),
+        ]
+        (dapa,) = _scan(segments)
+        self.assertEqual(_sentences(dapa), ["Mortality fell by 26%."])
+
+    def test_duplicated_reference_entry_still_maps_its_number(self) -> None:
+        segments = [
+            ("line 1", "Mortality fell by 26% [2]."),
+            ("line 2", "## References"),
+            ("line 3", DAPA_REF),
+            ("line 4", "2." + DAPA_REF[2:]),
+        ]
+        (dapa,) = _scan(segments)
+        self.assertEqual(_sentences(dapa), ["Mortality fell by 26%."])
+
 
 class TestSentenceGrounding(unittest.TestCase):
     def test_sentence_numbers_ignore_years_and_stray_digits(self) -> None:
@@ -177,6 +244,42 @@ class TestSentenceGrounding(unittest.TestCase):
             [[d.code for d in r.diagnostics] for r in missing_everywhere], [["CLAIM_NUMBER_NOT_IN_ABSTRACT"]] * 2
         )
         self.assertIn("38%", missing_everywhere[0].diagnostics[0].message)
+
+    def test_relative_risk_reduction_derived_from_a_ratio_counts_as_found(self) -> None:
+        s = models.CitingSentence("line 1", "x [1].", "Risk fell by 26% (HR 0.74).", ["10.1/a"])
+        rec = models.PaperRecord(doi="10.1/a", abstract="The hazard ratio was 0.74 (95% CI, 0.65 to 0.85).")
+        check = grounding.ground_sentence(s, rec)
+        self.assertEqual(check.report.missing_numbers, [])
+        self.assertTrue(any("26%" in m and "derived" in m for m in check.report.matched_numbers), check.report)
+
+    def test_sentence_without_numbers_never_warns_about_a_missing_abstract(self) -> None:
+        s = models.CitingSentence("line 1", "SGLT2i are recommended [1].", "SGLT2i are recommended.", ["10.1/a"])
+        rec = models.PaperRecord(doi="10.1/a", title="Guideline")
+        res = models.VerificationResult(
+            input=models.CitationInput(doi="10.1/a", citing_sentences=[s]),
+            status="PASS",
+            resolved=rec,
+            sentence_checks=[grounding.ground_sentence(s, rec)],
+        )
+        (out,) = grounding.reconcile_sentence_checks([res])
+        self.assertEqual((out.status, out.diagnostics), ("PASS", []))
+
+    def test_co_cited_population_mismatch_needs_every_cited_paper_to_disagree(self) -> None:
+        s = models.CitingSentence("line 1", "x [1,2].", "In HFpEF (HR 0.74).", ["10.1/a", "10.1/b"])
+        cohort = models.Diagnostic(code="CLAIM_COHORT_MISMATCH", severity="WARNING", message="different cohort")
+
+        def res(key: str, diags: list[models.Diagnostic]) -> models.VerificationResult:
+            r = self._result(key, s, [], ["HR 0.74"])
+            r.sentence_checks[0].diagnostics.extend(diags)
+            return r
+
+        one_disagrees = grounding.reconcile_sentence_checks([res("10.1/a", [cohort]), res("10.1/b", [])])
+        self.assertEqual([r.diagnostics for r in one_disagrees], [[], []])
+        both_disagree = grounding.reconcile_sentence_checks([res("10.1/a", [cohort]), res("10.1/b", [cohort])])
+        self.assertEqual(
+            [[(d.code, d.severity) for d in r.diagnostics] for r in both_disagree],
+            [[("CLAIM_COHORT_MISMATCH", "INFO")]] * 2,
+        )
 
     def test_uncheckable_co_citation_downgrades_to_a_note(self) -> None:
         s = models.CitingSentence("line 1", "x [1,3].", "40% fewer.", ["10.1/a"], uncheckable_refs=1)

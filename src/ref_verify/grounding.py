@@ -26,6 +26,11 @@ from ref_verify.quant import extract_claim_numbers
 from ref_verify.text import truncate
 
 _BARE_INT_RE = re.compile(r"^\d+$")
+_PERCENT_RE = re.compile(r"^(\d{1,2}(?:\.\d+)?)\s*%$")
+_RATIO_RE = re.compile(
+    r"\b(hazard ratio|HR|relative risk|risk ratio|RR|rate ratio|odds ratio|OR)\b[^0-9;.]{0,25}?(0?\.\d+)",
+    re.IGNORECASE,
+)
 # evaluate_claim diagnostics that describe the paper (once per result), not one sentence.
 _PER_PAPER_CODES = ("ABSTRACT_UNAVAILABLE", "FULLTEXT_UNAVAILABLE")
 
@@ -41,8 +46,22 @@ def sentence_claim_numbers(claim: str) -> list[str]:
             value = int(tok)
             if value < 10 or 1900 <= value <= 2100:
                 continue
+        if tok.count(")") > tok.count("("):  # "95% CI 0.65-0.85)" picked up with the closing bracket
+            tok = tok.rstrip(")").rstrip()
         out.append(tok)
     return out
+
+
+def _derived_reduction(token: str, source_text: str) -> str | None:
+    """'26%' is a relative reduction derived from 'hazard ratio was 0.74' (1 - 0.74 = 0.26): name that ratio."""
+    m = _PERCENT_RE.match(token)
+    if not m:
+        return None
+    pct = float(m.group(1))
+    for r in _RATIO_RE.finditer(source_text):
+        if abs((1 - float(r.group(2))) * 100 - pct) <= 0.6:
+            return f"{r.group(1)} {r.group(2)}"
+    return None
 
 
 def ground_sentence(
@@ -58,6 +77,15 @@ def ground_sentence(
         fulltext=fulltext,
         claim_numbers=sentence_claim_numbers(sentence.claim),
     )
+    source_text = "\n".join([rec.abstract or "", *(fulltext.paragraphs if fulltext else [])])
+    still_missing: list[str] = []
+    for tok in report.missing_numbers:
+        ratio = _derived_reduction(tok, source_text)
+        if ratio:
+            report.matched_numbers.append(f"{tok} [derived: 1 - {ratio}]")
+        else:
+            still_missing.append(tok)
+    report.missing_numbers = still_missing
     return SentenceCheck(sentence=sentence, report=report, diagnostics=diags)
 
 
@@ -116,13 +144,37 @@ def _sentence_diagnostics(
         diags.append(
             _missing_number_diagnostic(check, check.missing_after_cocitation, co_cited + s.uncheckable_refs, unread)
         )
-    if co_cited == 1:
-        for d in check.diagnostics:
-            if d.code == "CLAIM_COHORT_MISMATCH":
-                diags.append(
-                    replace(d, message=f"{_quote(s)} — {d.message}", details={**d.details, "location": s.location})
-                )
+    diags.extend(_cohort_diagnostics(check, by_sentence[_sentence_id(s)]))
     return diags
+
+
+def _has_cohort_mismatch(check: SentenceCheck) -> bool:
+    return any(d.code == "CLAIM_COHORT_MISMATCH" for d in check.diagnostics)
+
+
+def _cohort_diagnostics(check: SentenceCheck, peers: Sequence[SentenceCheck]) -> list[Diagnostic]:
+    """A population mismatch stands only if every read paper the sentence cites disagrees with it.
+
+    Reported as a note: a sentence lifted from running text often leaves its population implicit, and the
+    subgroup heuristics in ``cohort`` are tuned for deliberate ``--claim`` text.
+    """
+    read = [c for c in peers if c.report.abstract_available]
+    if not _has_cohort_mismatch(check) or not all(_has_cohort_mismatch(c) for c in read):
+        return []
+    s = check.sentence
+    unread = s.uncheckable_refs + (len(s.cited_keys) - len(read))
+    out = []
+    for d in check.diagnostics:
+        if d.code == "CLAIM_COHORT_MISMATCH":
+            out.append(
+                replace(
+                    d,
+                    severity="INFO",
+                    message=f"{_quote(s)} — {d.message}",
+                    details={**d.details, "location": s.location, "unread_refs": unread},
+                )
+            )
+    return out
 
 
 def _missing_everywhere(check: SentenceCheck, peers: Sequence[SentenceCheck]) -> list[str]:
@@ -153,6 +205,8 @@ def reconcile_sentence_checks(results: Sequence[VerificationResult]) -> list[Ver
         seen_codes = {d.code for d in res.diagnostics}
         for check in checks:
             added.extend(_sentence_diagnostics(check, by_sentence))
+            if not check.report.extracted_numbers:
+                continue  # nothing was looked up, so a missing abstract/full text changes nothing
             for d in check.diagnostics:
                 if d.code in _PER_PAPER_CODES and d.code not in seen_codes:
                     seen_codes.add(d.code)

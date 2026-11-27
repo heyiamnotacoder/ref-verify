@@ -17,25 +17,30 @@ from ref_verify.identifiers import strip_unbalanced_closing
 from ref_verify.models import CitationInput, CitingSentence
 from ref_verify.scan import (
     BIBLIOGRAPHY_HEADING_RE,
+    CITATION_NUMBER_LIST,
     SCAN_DOI_RE,
     SCAN_PMID_RE,
     BibliographyEntry,
     bibliography_entries,
     document_lines,
+    superscript_is_citation,
 )
 from ref_verify.text import strip_accents
 
-NUMERIC_MARKER_RE = re.compile(r"\s*\[(\d{1,3}(?:\s*[,–\-]\s*\d{1,3})*)\]")
+NUMERIC_MARKER_RE = re.compile(rf"\s*\[({CITATION_NUMBER_LIST})\]")
+# "(3)" only right before punctuation or the end, so enumerations like "(1) screening" are not citations.
+PAREN_MARKER_RE = re.compile(rf"\s*\(({CITATION_NUMBER_LIST})\)(?=\s*(?:[.,;:]|$))")
+_TYPED_SUPERSCRIPT_RE = re.compile(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:[,⁻–][⁰¹²³⁴⁵⁶⁷⁸⁹]+)*")
+_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
 _ENTRY_NUMBER_RE = re.compile(r"^\s*\[?(\d{1,4})[\].)]")
 _NAME = r"[A-Z][\w'’\-]+"
+# "McMurray", "McMurray et al.", "McMurray and Solomon": the first author is captured as ``name``.
+_AUTHORS = rf"(?P<name>{_NAME})(?:\s+et\s+al\.?|\s+(?:and|&)\s+{_NAME})?"
 _AUTHOR_YEAR_PART_RE = re.compile(
-    rf"^\s*(?:see\s+|e\.g\.,?\s+|cf\.\s+)?(?P<name>{_NAME})(?:\s+et\s+al\.?|\s+(?:and|&)\s+{_NAME})?,?\s+"
-    r"(?P<year>(?:19|20)\d{2})[a-z]?\s*$"
+    rf"^\s*(?:see\s+|e\.g\.,?\s+|cf\.\s+)?{_AUTHORS},?\s+(?P<year>(?:19|20)\d{{2}})[a-z]?\s*$"
 )
 _PARENTHETICAL_RE = re.compile(r"\s*\(([^()]{4,200})\)")
-_NARRATIVE_RE = re.compile(
-    rf"(?P<name>{_NAME})(?:\s+et\s+al\.?|\s+(?:and|&)\s+{_NAME})?\s+(?P<paren>\((?P<year>(?:19|20)\d{{2}})[a-z]?\))"
-)
+_NARRATIVE_RE = re.compile(rf"{_AUTHORS}\s+(?P<paren>\((?P<year>(?:19|20)\d{{2}})[a-z]?\))")
 _LOCATOR_RE = re.compile(
     r"\s*(?:https?://\S+|\bdoi\s*:\s*\S+|\b10\.\d{4,9}/[^\s<>\"'{}|\\^\[\]`]+|\bPMID\s*[:#]?\s*\d{5,9}\b)",
     flags=re.IGNORECASE,
@@ -81,30 +86,42 @@ class _ReferenceIndex:
     """Maps citation markers in body text to citations (index into the citation list) or unlinked entries."""
 
     def __init__(self, entries: Sequence[BibliographyEntry], citations: Sequence[CitationInput]) -> None:
-        by_text = {c.reference_text: i for i, c in enumerate(citations) if c.reference_text}
+        self._by_doi: dict[str, int] = {}
+        self._by_pmid: dict[str, int] = {}
+        self._by_author_year: dict[tuple[str, str], list[int]] = {}
+        for i, c in enumerate(citations):
+            if c.doi:
+                self._by_doi.setdefault(c.doi.lower(), i)
+            if c.pmid:
+                self._by_pmid.setdefault(c.pmid, i)
+            if c.author and c.year:
+                key = (_surname_key(c.author.split()[0]), str(c.year))
+                self._by_author_year.setdefault(key, []).append(i)
+
         explicit = [_ENTRY_NUMBER_RE.match(e.text) for e in entries]
         use_explicit = any(explicit)
         self._by_number: dict[int, list[tuple[str, int | None]]] = {}
         for ordinal, (entry, m) in enumerate(zip(entries, explicit), start=1):
             number = int(m.group(1)) if use_explicit and m else (None if use_explicit else ordinal)
             if number is not None:
-                self._by_number.setdefault(number, []).append((entry.location, by_text.get(entry.text)))
+                self._by_number.setdefault(number, []).append((entry.location, self._entry_citation(entry)))
 
-        self._by_author_year: dict[tuple[str, str], list[int]] = {}
-        self._by_doi: dict[str, int] = {}
-        self._by_pmid: dict[str, int] = {}
-        for i, c in enumerate(citations):
-            if c.author and c.year:
-                key = (_surname_key(c.author.split()[0]), str(c.year))
-                self._by_author_year.setdefault(key, []).append(i)
-            if c.doi:
-                self._by_doi.setdefault(c.doi.lower(), i)
-            if c.pmid:
-                self._by_pmid.setdefault(c.pmid, i)
+    def _entry_citation(self, entry: BibliographyEntry) -> int | None:
+        """The citation an entry's DOI/PMID belongs to; a duplicated entry maps to the same citation."""
+        for m in SCAN_DOI_RE.finditer(entry.text):
+            doi, _ = strip_unbalanced_closing(m.group(1))
+            if (idx := self.doi(doi)) is not None:
+                return idx
+        for m in SCAN_PMID_RE.finditer(entry.text):
+            if (idx := self.pmid(m.group(1) or m.group(2))) is not None:
+                return idx
+        return None
 
     def number(self, n: int, location: str) -> tuple[bool, int | None]:
         """(is a known reference, its citation index or None when the entry has no DOI/PMID)."""
         candidates = self._by_number.get(n, [])
+        if len({idx for _, idx in candidates}) == 1:  # a duplicated entry for the same paper
+            return True, candidates[0][1]
         if len(candidates) > 1:  # e.g. every slide restarting at 1: prefer the entry on the same slide
             candidates = [c for c in candidates if c[0] == location]
         if len(candidates) != 1:
@@ -134,14 +151,15 @@ def _cited_in(sentence: str, location: str, index: _ReferenceIndex) -> tuple[lis
     uncheckable = 0
     claim = sentence
 
-    for m in NUMERIC_MARKER_RE.finditer(sentence):
-        for n in _expand_numbers(m.group(1)):
-            known, idx = index.number(n, location)
-            if known and idx is None:
-                uncheckable += 1
-            elif idx is not None:
-                cited.append(idx)
-    claim = NUMERIC_MARKER_RE.sub("", claim)
+    for marker_re in (NUMERIC_MARKER_RE, PAREN_MARKER_RE):
+        for m in marker_re.finditer(claim):
+            for n in _expand_numbers(m.group(1)):
+                known, idx = index.number(n, location)
+                if known and idx is None:
+                    uncheckable += 1
+                elif idx is not None:
+                    cited.append(idx)
+        claim = marker_re.sub("", claim)
 
     def _parenthetical(m: re.Match[str]) -> str:
         parts = [_AUTHOR_YEAR_PART_RE.match(p) for p in m.group(1).split(";")]
@@ -169,6 +187,16 @@ def _cited_in(sentence: str, location: str, index: _ReferenceIndex) -> tuple[lis
     return list(dict.fromkeys(cited)), uncheckable, _tidy(claim)
 
 
+def _typed_superscripts_to_markers(text: str) -> str:
+    """ "fraction.¹⁻³" -> "fraction.[1-3]"; exponents such as "kg/m²", "10³", "I²" stay as written."""
+
+    def repl(m: re.Match[str]) -> str:
+        digits = m.group(0).translate(_SUPERSCRIPT_DIGITS)
+        return f"[{digits}]" if superscript_is_citation(digits, text[: m.start()]) else m.group(0)
+
+    return _TYPED_SUPERSCRIPT_RE.sub(repl, text)
+
+
 def attach_citing_sentences(segments: Sequence[tuple[str, str]], citations: Sequence[CitationInput]) -> None:
     """Fill ``citation.citing_sentences`` for every citation cited by a body sentence of the document."""
     lines = document_lines(segments)
@@ -176,7 +204,7 @@ def attach_citing_sentences(segments: Sequence[tuple[str, str]], citations: Sequ
     for line in lines:
         if line.is_bibliography_entry or BIBLIOGRAPHY_HEADING_RE.match(line.text):
             continue
-        for sentence in split_citing_sentences(line.text):
+        for sentence in split_citing_sentences(_typed_superscripts_to_markers(line.text)):
             cited, uncheckable, claim = _cited_in(sentence, line.location, index)
             if not cited:
                 continue

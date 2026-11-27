@@ -22,10 +22,19 @@ SCAN_PMID_RE = re.compile(
 )
 
 
+# "3", "1,2", "4-6", "1, 3\u20135": the number lists used by Vancouver citation markers.
+CITATION_NUMBER_LIST = r"\d{1,3}(?:\s*[,\u2013\-]\s*\d{1,3})*"
 # A superscript run is a citation marker ("26%.¹,²") only if it is a short number list and does not
-# follow a unit or base ("kg/m²", "10³").
-SUPERSCRIPT_CITATION_RE = re.compile(r"\s*\d{1,3}(?:\s*[,\u2013-]\s*\d{1,3})*\s*")
-_SUPERSCRIPT_UNIT_RE = re.compile(r"(?:\b(?:[kcmµμ]?m|[mkµμ]?g|d?[lL]|mol|s)|/[A-Za-z]+|\d|\^)$")
+# follow a unit, a number, or a one/two-letter symbol ("kg/m²", "10³", "I²", "R²", "χ²").
+SUPERSCRIPT_CITATION_RE = re.compile(rf"\s*{CITATION_NUMBER_LIST}\s*")
+_SUPERSCRIPT_UNIT_RE = re.compile(
+    r"(?:\b(?:[kcmµμ]?m|[mkµμ]?g|d?[lL]|mol|s)|/[A-Za-z]+|(?<![\d.])10|\^|(?<![^\W\d_])[^\W\d_]{1,2})$"
+)
+
+
+def superscript_is_citation(sup: str, before: str) -> bool:
+    """Whether superscript ``sup`` written right after ``before`` is a citation marker, not an exponent."""
+    return bool(SUPERSCRIPT_CITATION_RE.fullmatch(sup)) and not _SUPERSCRIPT_UNIT_RE.search(before.rstrip())
 
 
 def _paragraph_text(p_elem: ET.Element, is_superscript_run: Callable[[ET.Element], bool]) -> str:
@@ -44,7 +53,7 @@ def _paragraph_text(p_elem: ET.Element, is_superscript_run: Callable[[ET.Element
         sup = "".join(pending_sup)
         pending_sup.clear()
         before = "".join(pieces).rstrip()
-        if SUPERSCRIPT_CITATION_RE.fullmatch(sup) and not _SUPERSCRIPT_UNIT_RE.search(before):
+        if superscript_is_citation(sup, before):
             pieces.append(f"[{sup.strip()}]")
         else:
             pieces.append(sup)
